@@ -6,8 +6,9 @@
     "build": "nest build",
     "start": "nest start",
     "start:dev": "nest start --watch",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/src/main",
     "seed": "ts-node src/seed.ts",
+    "seed:prod": "node dist/src/seed",
     "test": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
