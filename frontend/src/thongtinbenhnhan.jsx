@@ -45,6 +45,22 @@ const EMPTY = {
   ten_benh: "", ma_icd: "", dien_giai: "",
 };
 
+// Field/Section phải nằm ngoài component chính, nếu không mỗi lần gõ phím sẽ bị tạo lại và ô nhập mất focus
+const Field = ({ label, children, span }) => (
+  <label style={{ display: "block", gridColumn: span ? `span ${span}` : undefined }}>
+    <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "block", marginBottom: 5 }}>{label}</span>
+    {children}
+  </label>
+);
+const Section = ({ icon: Icon, title, cols = 3, children }) => (
+  <Card style={{ padding: 20, marginBottom: 16 }}>
+    <div style={{ fontWeight: 800, color: T.ink, fontSize: 15, marginBottom: 14, paddingBottom: 10, borderBottom: `1px solid ${T.line}`, display: "flex", alignItems: "center", gap: 8 }}>
+      {Icon && <Icon size={17} color={T.gold} />} {title}
+    </div>
+    <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 14 }} className="grid3">{children}</div>
+  </Card>
+);
+
 export default function ThongTinBenhNhan() {
   const { online } = useNav();
   const live = online && !!store.token;
@@ -111,21 +127,6 @@ export default function ThongTinBenhNhan() {
       <input type="checkbox" checked={!!f[k]} onChange={(e) => set(k, e.target.checked)} style={{ accentColor: T.gold, width: 16, height: 16 }} /> {label}
     </label>
   );
-  const Field = ({ label, children, span }) => (
-    <label style={{ display: "block", gridColumn: span ? `span ${span}` : undefined }}>
-      <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "block", marginBottom: 5 }}>{label}</span>
-      {children}
-    </label>
-  );
-  const Section = ({ icon: Icon, title, cols = 3, children }) => (
-    <Card style={{ padding: 20, marginBottom: 16 }}>
-      <div style={{ fontWeight: 800, color: T.ink, fontSize: 15, marginBottom: 14, paddingBottom: 10, borderBottom: `1px solid ${T.line}`, display: "flex", alignItems: "center", gap: 8 }}>
-        {Icon && <Icon size={17} color={T.gold} />} {title}
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 14 }} className="grid3">{children}</div>
-    </Card>
-  );
-
   if (!live) {
     return (
       <div>
