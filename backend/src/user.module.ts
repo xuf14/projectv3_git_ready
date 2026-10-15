@@ -9,12 +9,12 @@ import { NguoiDung, BacSi, KhoaPhong, KhungGio, NhatKyHoatDong, VaiTro } from '.
 import { JwtAuthGuard, RolesGuard, Roles } from './auth';
 
 // Quản trị viên chỉ tạo tài khoản nhân sự; bệnh nhân tự đăng ký ở trang public
-const VAI_TRO_TAO_DUOC: string[] = [VaiTro.BAC_SI, VaiTro.LE_TAN, VaiTro.ADMIN];
+const VAI_TRO_TAO_DUOC: string[] = [VaiTro.BAC_SI, VaiTro.LE_TAN, VaiTro.QUAN_LY, VaiTro.ADMIN];
 const GIO_KHAM = ['07:30', '08:00', '08:30', '09:00', '09:30', '10:00', '13:30', '14:00', '14:30', '15:00'];
 const SO_NGAY_SINH_KHUNG_GIO = 14;
 
 const NHAN_VAI_TRO: Record<string, string> = {
-  bac_si: 'Bác sĩ', le_tan: 'Lễ tân', admin: 'Quản trị viên', benh_nhan: 'Bệnh nhân',
+  bac_si: 'Bác sĩ', le_tan: 'Lễ tân', quan_ly: 'Quản lý', admin: 'Quản trị viên', benh_nhan: 'Bệnh nhân',
 };
 
 @Injectable()
@@ -50,7 +50,7 @@ export class UserAdminService {
     if (!dto.mat_khau || String(dto.mat_khau).length < 6)
       throw new BadRequestException('Mật khẩu phải có ít nhất 6 ký tự');
     if (!VAI_TRO_TAO_DUOC.includes(dto.vai_tro))
-      throw new BadRequestException('Vai trò phải là Bác sĩ, Lễ tân hoặc Quản trị viên');
+      throw new BadRequestException('Vai trò phải là Bác sĩ, Lễ tân, Quản lý hoặc Quản trị viên');
     if (sdt && !/^0\d{9,10}$/.test(sdt)) throw new BadRequestException('Số điện thoại không hợp lệ');
 
     const existed = await this.users.findOne({ where: sdt ? [{ email }, { sdt }] : [{ email }] });

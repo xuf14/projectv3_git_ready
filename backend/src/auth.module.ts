@@ -1,65 +1,23 @@
 import {
-  Injectable, Controller, Post, Body, BadRequestException, UnauthorizedException, Get, UseGuards, Request,
+  Injectable, Controller, Post, Patch, Body, BadRequestException, UnauthorizedException, Get, UseGuards, Request,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
-import { NguoiDung, HoSoBenhNhan, VaiTro } from './entities';
+import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
+import { NguoiDung } from './entities';
 import { JwtAuthGuard } from './auth';
-import { chuanHoaHoSo } from './profile.module';
 
-// Bộ nhớ tạm cho OTP (thực tế nên dùng Redis + gửi SMS/email)
-const otpStore = new Map<string, string>();
+// Số lần đăng nhập tối đa của MỘT IP trong 1 phút (cấu hình qua .env)
+const GIOI_HAN_LOGIN = Math.max(1, Number(process.env.THROTTLE_LOGIN_LIMIT) || 10);
 
 @Injectable()
 export class AuthService {
   constructor(
     @InjectRepository(NguoiDung) private users: Repository<NguoiDung>,
-    @InjectRepository(HoSoBenhNhan) private hoSo: Repository<HoSoBenhNhan>,
     private jwt: JwtService,
   ) {}
-
-  // Bước 1: yêu cầu OTP (giả lập — trả luôn mã để demo)
-  async requestOtp(sdt: string) {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(sdt, otp);
-    // Thực tế: gửi SMS qua nhà cung cấp. Ở đây trả về để test.
-    return { message: 'Mã OTP đã được gửi (demo)', otp_demo: otp };
-  }
-
-  // Bước 2: đăng ký kèm xác thực OTP. Ngoài tài khoản, các thông tin bệnh nhân
-  // (ngày sinh, giới tính, địa chỉ, BHYT...) được lưu luôn vào hồ sơ bệnh nhân.
-  async register(dto: any) {
-    const { ho_ten, sdt, email, mat_khau, otp } = dto;
-    if (!ho_ten || !mat_khau || (!sdt && !email))
-      throw new BadRequestException('Thiếu thông tin bắt buộc');
-    if (mat_khau.length < 6) throw new BadRequestException('Mật khẩu phải có ít nhất 6 ký tự');
-    if (sdt && otpStore.get(sdt) !== otp)
-      throw new BadRequestException('Mã OTP không đúng hoặc đã hết hạn');
-
-    // Kiểm tra + whitelist thông tin hồ sơ trước khi tạo bất cứ bản ghi nào
-    const hoSoData = chuanHoaHoSo({
-      ho_ten, sdt,
-      ngay_sinh: dto.ngay_sinh, gioi_tinh: dto.gioi_tinh,
-      dia_chi: dto.dia_chi, so_bhyt: dto.so_bhyt,
-    }, false);
-
-    const existed = await this.users.findOne({ where: [{ sdt }, { email }] });
-    if (existed) throw new BadRequestException('Số điện thoại hoặc email đã được đăng ký');
-
-    const hash = await bcrypt.hash(mat_khau, 10);
-    const user = await this.users.save(this.users.create({
-      ho_ten, sdt, email, mat_khau_hash: hash, vai_tro: VaiTro.BENH_NHAN,
-    }));
-    await this.hoSo.save(this.hoSo.create({
-      ...hoSoData,
-      ma_benh_nhan: 'BN' + Date.now().toString().slice(-8),
-      nguoi_dung: user,
-    }));
-    otpStore.delete(sdt);
-    return this.sign(user);
-  }
 
   async login(dto: any) {
     const { tai_khoan, mat_khau } = dto; // tai_khoan = sdt hoặc email
@@ -69,6 +27,24 @@ export class AuthService {
     const ok = await bcrypt.compare(mat_khau, user.mat_khau_hash);
     if (!ok) throw new UnauthorizedException('Mật khẩu không đúng');
     return this.sign(user);
+  }
+
+  // Người dùng tự đổi mật khẩu của CHÍNH mình: phải nhập đúng mật khẩu hiện tại.
+  // Áp dụng cho mọi vai trò (admin, bác sĩ, lễ tân, bệnh nhân) đang đăng nhập.
+  async doiMatKhau(userId: number, matKhauCu: string, matKhauMoi: string) {
+    if (!matKhauCu || !matKhauMoi)
+      throw new BadRequestException('Thiếu mật khẩu hiện tại hoặc mật khẩu mới');
+    if (String(matKhauMoi).length < 6)
+      throw new BadRequestException('Mật khẩu mới phải có ít nhất 6 ký tự');
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new UnauthorizedException('Tài khoản không tồn tại');
+    const ok = await bcrypt.compare(String(matKhauCu), user.mat_khau_hash);
+    if (!ok) throw new BadRequestException('Mật khẩu hiện tại không đúng');
+    if (await bcrypt.compare(String(matKhauMoi), user.mat_khau_hash))
+      throw new BadRequestException('Mật khẩu mới phải khác mật khẩu hiện tại');
+    user.mat_khau_hash = await bcrypt.hash(String(matKhauMoi), 10);
+    await this.users.save(user);
+    return { message: 'Đổi mật khẩu thành công' };
   }
 
   private sign(user: NguoiDung) {
@@ -84,10 +60,16 @@ export class AuthService {
 export class AuthController {
   constructor(private svc: AuthService) {}
 
-  @Post('request-otp') requestOtp(@Body() b: any) { return this.svc.requestOtp(b.sdt); }
-  @Post('register') register(@Body() b: any) { return this.svc.register(b); }
+  // Giới hạn số lần đăng nhập của một IP trong 1 phút để chống dò mật khẩu
+  @Throttle({ default: { limit: GIOI_HAN_LOGIN, ttl: 60000 } })
+  @UseGuards(ThrottlerGuard)
   @Post('login') login(@Body() b: any) { return this.svc.login(b); }
 
   @UseGuards(JwtAuthGuard)
   @Get('me') me(@Request() req) { return req.user; }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('doi-mat-khau') doiMatKhau(@Request() req, @Body() b: any) {
+    return this.svc.doiMatKhau(req.user.id, b.mat_khau_cu, b.mat_khau_moi);
+  }
 }

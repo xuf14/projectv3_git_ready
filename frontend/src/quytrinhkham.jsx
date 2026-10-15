@@ -1,10 +1,18 @@
 import React, { useState, useEffect } from "react";
 import {
   UserCheck, Activity, Stethoscope, FlaskConical, ClipboardCheck, Wallet,
-  ArrowLeft, ChevronRight, CheckCircle2, Clock, User, Plus, Save, Search, Receipt, CircleDashed,
+  ArrowLeft, ChevronRight, CheckCircle2, Clock, User, Plus, Save, Search, Receipt, CircleDashed, Trash2, BedDouble,
 } from "lucide-react";
 import { T, store, api, useNav, Btn, Card, Pill, PageTitle, input } from "./shared";
 import { PaymentForm } from "./Billing";
+import CanLamSangThaiKy from "./canlamsangthaiky";
+import CanLamSangHoTroSinhSan from "./hotrosinhsan";
+
+// Nhận diện lần khám thuộc khoa Hỗ trợ sinh sản (IVF) để hiện gợi ý phù hợp.
+const laKhoaIVF = (khoa) => {
+  const s = (khoa || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  return s.includes("ho tro sinh san") || s.includes("ivf");
+};
 
 // ============================================================================
 //  QUY TRÌNH KHÁM 6 BƯỚC — theo mục 6 tài liệu thiết kế hệ thống:
@@ -315,12 +323,15 @@ function Step3({ flow, canEdit, onDone }) {
 // ---------- B4: Cận lâm sàng ----------
 function Step4({ flow, canEdit, onDone }) {
   const ds = flow.chi_dinh || [];
+  const laIVF = laKhoaIVF(flow.lich_hen && flow.lich_hen.khoa);
   const [loai, setLoai] = useState("xet_nghiem");
   const [ten, setTen] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const [openResult, setOpenResult] = useState(null); // id chỉ định đang nhập kết quả
   const [kq, setKq] = useState(""); const [klText, setKlText] = useState("");
+  const [goiY, setGoiY] = useState(false);       // bảng gợi ý theo giai đoạn thai kỳ
+  const [dangThem, setDangThem] = useState(null); // tên mục đang thêm từ bảng gợi ý
 
   const them = async () => {
     if (!ten.trim()) { setErr("Nhập tên chỉ định."); return; }
@@ -328,24 +339,51 @@ function Step4({ flow, canEdit, onDone }) {
     try { await api.addOrder(flow.lich_hen.id, { loai, ten_chi_dinh: ten }); setTen(""); onDone("Đã thêm chỉ định."); }
     catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
+  // Thêm nhanh một mục cận lâm sàng gợi ý theo giai đoạn thai kỳ
+  const themGoiY = async (loaiGY, tenGY) => {
+    setDangThem(tenGY); setErr(null);
+    try { await api.addOrder(flow.lich_hen.id, { loai: loaiGY, ten_chi_dinh: tenGY }); onDone(`Đã thêm chỉ định: ${tenGY}`); }
+    catch (e) { setErr(e.message); } finally { setDangThem(null); }
+  };
   const luuKq = async (id) => {
     if (!kq.trim()) { setErr("Nhập nội dung kết quả."); return; }
     setBusy(true); setErr(null);
     try { await api.orderResult(id, { ket_qua: kq, ket_luan: klText }); setOpenResult(null); setKq(""); setKlText(""); onDone("Đã lưu kết quả cận lâm sàng."); }
     catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
+  const [dangXoa, setDangXoa] = useState(null); // id chỉ định đang xóa
+  const xoa = async (c) => {
+    if (!window.confirm(`Xóa chỉ định "${c.ten_chi_dinh}"?${c.trang_thai === "da_co_ket_qua" ? " Kết quả đã nhập cũng sẽ bị xóa." : ""}`)) return;
+    setDangXoa(c.id); setErr(null);
+    try { await api.deleteOrder(c.id); if (openResult === c.id) setOpenResult(null); onDone(`Đã xóa chỉ định: ${c.ten_chi_dinh}`); }
+    catch (e) { setErr(e.message); } finally { setDangXoa(null); }
+  };
 
   return (
     <Card style={{ padding: 22 }}>
       <div style={{ fontWeight: 800, color: T.ink, fontSize: 16, marginBottom: 14 }}>Bước 4 — Chỉ định cận lâm sàng & kết quả</div>
       {canEdit && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-          <select style={{ ...inp, width: "auto" }} value={loai} onChange={(e) => setLoai(e.target.value)}>
-            {Object.entries(LOAI_CLS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </select>
-          <input style={{ ...inp, flex: 1, minWidth: 200 }} value={ten} onChange={(e) => setTen(e.target.value)} onKeyDown={(e) => e.key === "Enter" && them()} placeholder="VD: Siêu âm thai 4D, BhCG, Công thức máu..." />
-          <Btn kind="lav" disabled={busy} onClick={them}><Plus size={15} /> Thêm chỉ định</Btn>
-        </div>
+        <>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+            <select style={{ ...inp, width: "auto" }} value={loai} onChange={(e) => setLoai(e.target.value)}>
+              {Object.entries(LOAI_CLS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+            <input style={{ ...inp, flex: 1, minWidth: 200 }} value={ten} onChange={(e) => setTen(e.target.value)} onKeyDown={(e) => e.key === "Enter" && them()} placeholder="VD: Siêu âm thai 4D, BhCG, Công thức máu..." />
+            <Btn kind="lav" disabled={busy} onClick={them}><Plus size={15} /> Thêm chỉ định</Btn>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <Btn kind="ghost" size="sm" onClick={() => setGoiY((v) => !v)}>
+              <FlaskConical size={14} /> {goiY
+                ? (laIVF ? "Ẩn gợi ý hỗ trợ sinh sản (IVF)" : "Ẩn gợi ý theo giai đoạn thai kỳ")
+                : (laIVF ? "Gợi ý cận lâm sàng hỗ trợ sinh sản (IVF)" : "Gợi ý cận lâm sàng theo giai đoạn thai kỳ")}
+            </Btn>
+            {goiY && <div style={{ marginTop: 12 }}>
+              {laIVF
+                ? <CanLamSangHoTroSinhSan onChon={themGoiY} dangThem={dangThem} />
+                : <CanLamSangThaiKy onChon={themGoiY} dangThem={dangThem} />}
+            </div>}
+          </div>
+        </>
       )}
       {ds.length === 0 && <div style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 14, border: `1.5px dashed ${T.line}`, borderRadius: 12 }}>
         Chưa có chỉ định nào — nếu không cần cận lâm sàng, bác sĩ chuyển sang bước 5 Kết luận.
@@ -361,6 +399,10 @@ function Step4({ flow, canEdit, onDone }) {
                 : <Pill tone={T.gold} soft={T.goldSoft}><CircleDashed size={13} /> Chờ kết quả</Pill>}
               {canEdit && c.trang_thai !== "da_co_ket_qua" && openResult !== c.id &&
                 <Btn kind="ghost" size="sm" onClick={() => { setOpenResult(c.id); setKq(""); setKlText(""); }}>Nhập kết quả</Btn>}
+              {canEdit &&
+                <Btn kind="ghost" size="sm" disabled={dangXoa === c.id} onClick={() => xoa(c)} title="Xóa chỉ định">
+                  <Trash2 size={14} color={T.peach} /> {dangXoa === c.id ? "Đang xóa…" : "Xóa"}
+                </Btn>}
             </div>
             {c.ket_qua && <div style={{ marginTop: 10, fontSize: 13.5, color: T.ink, whiteSpace: "pre-wrap", background: T.bg, borderRadius: 10, padding: "10px 12px" }}>
               {c.ket_qua}{c.ket_luan ? <div style={{ marginTop: 6, color: T.sub }}>Kết luận: {c.ket_luan}</div> : null}
@@ -385,21 +427,75 @@ function Step4({ flow, canEdit, onDone }) {
 }
 
 // ---------- B5: Kết luận ----------
+const UU_TIEN_NV = { cap_cuu: "Cấp cứu", khan: "Khẩn", thuong: "Thông thường", theo_lich: "Theo lịch" };
+const DI_CHUYEN_NV = { di_bo: "Đi bộ", xe_lan: "Xe lăn", cang: "Cáng" };
+
 function Step5({ flow, canEdit, onDone }) {
+  const { departments } = useNav();
   const kl = flow.ket_luan;
+  const yc = flow.nhap_vien;           // yêu cầu nhập viện đã ký của lần khám này
+  const dsKhoa = (departments || []).filter((d) => d.dbId);
   const [f, setF] = useState({
     chan_doan_chinh: (kl && kl.chan_doan_chinh) || "", ma_icd: (kl && kl.ma_icd) || "",
     chan_doan_phu: (kl && kl.chan_doan_phu) || "", huong_xu_tri: (kl && kl.huong_xu_tri) || "ke_don",
     don_thuoc: (kl && kl.don_thuoc) || "", loi_dan: (kl && kl.loi_dan) || "", ngay_tai_kham: (kl && kl.ngay_tai_kham) || "",
   });
+  // Panel nhập viện rút gọn — điền sẵn từ yêu cầu đã ký, không bắt nhập lại
+  const [nv, setNv] = useState({
+    khoa_id: yc && yc.khoa ? String(yc.khoa.id) : "",
+    uu_tien: (yc && yc.uu_tien) || "thuong",
+    ly_do_uu_tien: (yc && yc.ly_do_uu_tien) || "",
+    ly_do: (yc && yc.ly_do) || "",
+    canh_bao: (yc && yc.canh_bao) || "",
+    ho_tro_di_chuyen: (yc && yc.ho_tro_di_chuyen) || "di_bo",
+    ngay_du_kien: (yc && yc.ngay_du_kien) || "",
+  });
+  const setN = (k) => (e) => setNv((s) => ({ ...s, [k]: e.target.value }));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
   const clsChuaXong = flow.buoc.b4_cls === "cho_ket_qua";
+  // Chỉ hướng xử trí "Hẹn tái khám" mới cần ngày; đổi sang hướng khác thì xóa ngày
+  // để không gửi nhầm lịch tái khám cũ cho lễ tân.
+  const henTaiKham = f.huong_xu_tri === "hen_tai_kham";
+  const doiXuTri = (e) => {
+    const v = e.target.value;
+    setF((s) => ({ ...s, huong_xu_tri: v, ngay_tai_kham: v === "hen_tai_kham" ? s.ngay_tai_kham : "" }));
+  };
+  const homNay = new Date().toLocaleDateString("en-CA");
+  // Đề nghị nhập viện: mở panel rút gọn ngay dưới, bác sĩ không phải chuyển trang
+  const deNghiNV = f.huong_xu_tri === "de_nghi_nhap_vien";
+  const uuTienGap = ["cap_cuu", "khan"].includes(nv.uu_tien);
+  // Yêu cầu đã thành hồ sơ nội trú thì nội dung đã ký là bất biến
+  const nvDaChot = !!(yc && yc.noi_tru);
 
   const save = async () => {
+    if (henTaiKham && !f.ngay_tai_kham) { setErr("Chọn ngày tái khám để gửi lịch cho lễ tân."); return; }
+    if (deNghiNV) {
+      if (!f.chan_doan_chinh.trim()) { setErr("Chẩn đoán chính là bắt buộc khi đề nghị nhập viện."); return; }
+      if (uuTienGap && !nv.ly_do_uu_tien.trim()) { setErr("Mức ưu tiên cấp cứu/khẩn phải ghi rõ lý do ưu tiên."); return; }
+      if (nv.uu_tien === "theo_lich" && !nv.ngay_du_kien) { setErr("Nhập viện theo lịch phải chọn ngày dự kiến."); return; }
+    }
     setBusy(true); setErr(null);
-    try { await api.saveConclusion(flow.lich_hen.id, f); onDone("Đã lưu kết luận — lần khám chuyển sang Đã khám, lễ tân có thể lập thanh toán."); }
+    try {
+      const r = await api.saveConclusion(flow.lich_hen.id, {
+        ...f,
+        ngay_tai_kham: henTaiKham ? f.ngay_tai_kham : "",
+        nhap_vien: deNghiNV ? {
+          ...nv,
+          khoa_id: nv.khoa_id ? Number(nv.khoa_id) : undefined,
+          ngay_du_kien: nv.uu_tien === "theo_lich" ? nv.ngay_du_kien : "",
+        } : undefined,
+      });
+      const tk = r && r.tai_kham;
+      const ycMoi = r && r.nhap_vien;
+      onDone(ycMoi
+        ? `Đã ký và gửi yêu cầu nhập viện ${ycMoi.ma_yeu_cau} — đang chờ lễ tân tiếp nhận.`
+        : tk
+          ? `Đã lưu kết luận và chuyển lịch tái khám ngày ${new Date(tk.ngay).toLocaleDateString("vi-VN")}` +
+            `${tk.gio ? ` lúc ${tk.gio}` : ""} (mã ${tk.ma_lich_hen}) cho lễ tân.`
+          : "Đã lưu kết luận — lần khám chuyển sang Đã khám, lễ tân có thể lập thanh toán.");
+    }
     catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
 
@@ -419,6 +515,8 @@ function Step5({ flow, canEdit, onDone }) {
           <KV k="Chẩn đoán phụ" v={kl.chan_doan_phu} />
           <KV k="Hướng xử trí" v={XU_TRI[kl.huong_xu_tri] || kl.huong_xu_tri} />
           <KV k="Đơn thuốc" v={kl.don_thuoc} /><KV k="Lời dặn" v={kl.loi_dan} /><KV k="Ngày tái khám" v={kl.ngay_tai_kham} />
+          {yc && <KV k="Nhập viện" v={`${yc.ma_yeu_cau} — ${yc.nhan_trang_thai}` +
+            `${yc.noi_tru ? ` · số vào viện ${yc.noi_tru.so_vao_vien}` : ""}`} />}
         </div>
       )}
       {canEdit && (
@@ -427,16 +525,83 @@ function Step5({ flow, canEdit, onDone }) {
           <Field label="Mã ICD"><input style={inp} value={f.ma_icd} onChange={set("ma_icd")} placeholder="VD: O26.9" /></Field>
           <Field label="Chẩn đoán phụ / phân biệt" span={3}><input style={inp} value={f.chan_doan_phu} onChange={set("chan_doan_phu")} /></Field>
           <Field label="Hướng xử trí">
-            <select style={inp} value={f.huong_xu_tri} onChange={set("huong_xu_tri")}>
+            <select style={inp} value={f.huong_xu_tri} onChange={doiXuTri}>
               {Object.entries(XU_TRI).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
           </Field>
-          <Field label="Ngày tái khám"><input type="date" style={inp} value={f.ngay_tai_kham} onChange={set("ngay_tai_kham")} /></Field>
-          <span />
+          {henTaiKham ? (
+            <Field label="Ngày tái khám *" span={2}>
+              <input type="date" style={inp} min={homNay} value={f.ngay_tai_kham} onChange={set("ngay_tai_kham")} />
+              <div style={{ marginTop: 6, fontSize: 12.5, color: T.sub }}>
+                Lễ tân sẽ nhận lịch tái khám của bệnh nhân vào ngày này (khung giờ 08:00).
+              </div>
+            </Field>
+          ) : (
+            <div style={{ gridColumn: "span 2", alignSelf: "center", fontSize: 13, color: T.sub }}>
+              Không hẹn tái khám — không cần chọn ngày, bấm kết luận là hoàn tất khám.
+            </div>
+          )}
+          {deNghiNV && (
+            <div style={{ gridColumn: "span 3", border: `1.5px solid ${T.line}`, borderRadius: 14, padding: 16, background: T.bg }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                <BedDouble size={16} color={T.lav} />
+                <b style={{ color: T.ink, fontSize: 14.5 }}>Phiếu nhập viện rút gọn</b>
+                <span style={{ fontSize: 12.5, color: T.sub }}>
+                  Chẩn đoán, bệnh nhân và lần khám lấy tự động — chỉ xác nhận khoa, ưu tiên và lý do.
+                </span>
+              </div>
+              {nvDaChot && <div style={{ marginBottom: 12, background: T.mintSoft, color: T.mint, fontSize: 13, padding: "9px 12px", borderRadius: 10 }}>
+                Người bệnh đã được nhập viện (số vào viện {yc.noi_tru.so_vao_vien}) — nội dung đã ký không sửa được nữa.
+              </div>}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }} className="grid3">
+                <Field label="Khoa nhập viện *">
+                  <select style={inp} value={nv.khoa_id} onChange={setN("khoa_id")} disabled={nvDaChot}>
+                    <option value="">Theo khoa đang khám ({flow.lich_hen.khoa || "—"})</option>
+                    {dsKhoa.map((d) => <option key={d.dbId} value={d.dbId}>{d.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Mức độ ưu tiên *">
+                  <select style={inp} value={nv.uu_tien} onChange={setN("uu_tien")} disabled={nvDaChot}>
+                    {Object.entries(UU_TIEN_NV).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                </Field>
+                {nv.uu_tien === "theo_lich"
+                  ? <Field label="Ngày dự kiến *"><input type="date" style={inp} min={homNay} value={nv.ngay_du_kien} onChange={setN("ngay_du_kien")} disabled={nvDaChot} /></Field>
+                  : <Field label="Hỗ trợ di chuyển">
+                      <select style={inp} value={nv.ho_tro_di_chuyen} onChange={setN("ho_tro_di_chuyen")} disabled={nvDaChot}>
+                        {Object.entries(DI_CHUYEN_NV).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                    </Field>}
+                {uuTienGap && <Field label="Lý do ưu tiên *" span={3}>
+                  <input style={inp} value={nv.ly_do_uu_tien} onChange={setN("ly_do_uu_tien")} placeholder="VD: Huyết áp 170/110, ra máu nhiều" disabled={nvDaChot} />
+                </Field>}
+                <Field label="Lý do nhập viện" span={3}>
+                  <input style={inp} value={nv.ly_do} onChange={setN("ly_do")} placeholder={f.chan_doan_chinh || "Mặc định lấy theo chẩn đoán chính"} disabled={nvDaChot} />
+                </Field>
+                <Field label="Cảnh báo chuyển sang khoa" span={3}>
+                  <input style={inp} value={nv.canh_bao} onChange={setN("canh_bao")} placeholder="Dị ứng, cách ly, nguy cơ té ngã, cảnh báo sản khoa..." disabled={nvDaChot} />
+                </Field>
+              </div>
+              {yc && <div style={{ marginTop: 12, fontSize: 13, color: T.sub, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <Pill tone={T.lav} soft={T.lavSoft}>{yc.ma_yeu_cau}</Pill>
+                <Pill tone={yc.trang_thai === "cho_tiep_nhan" ? "#B7791F" : T.mint} soft={yc.trang_thai === "cho_tiep_nhan" ? T.goldSoft : T.mintSoft}>
+                  {yc.nhan_trang_thai}
+                </Pill>
+                <span>Ký lúc {fmtNgayGio(yc.thoi_gian_ky)} · phiên bản {yc.phien_ban}</span>
+                {yc.nguoi_tiep_nhan && <span>· {yc.nguoi_tiep_nhan.ho_ten} đang xử lý</span>}
+                {yc.noi_tru && yc.noi_tru.giuong && <span>· Giường {yc.noi_tru.giuong.ma.startsWith(yc.noi_tru.giuong.phong) ? yc.noi_tru.giuong.ma : `${yc.noi_tru.giuong.phong}-${yc.noi_tru.giuong.ma}`}</span>}
+              </div>}
+            </div>
+          )}
           <Field label="Đơn thuốc" span={3}><textarea rows={3} style={{ ...inp, resize: "vertical" }} value={f.don_thuoc} onChange={set("don_thuoc")} placeholder={"Mỗi dòng một thuốc: tên — liều — cách dùng — số ngày"} /></Field>
           <Field label="Lời dặn" span={3}><input style={inp} value={f.loi_dan} onChange={set("loi_dan")} /></Field>
           <div style={{ gridColumn: "span 3", display: "flex", justifyContent: "flex-end" }}>
-            <Btn kind="mint" disabled={busy} onClick={save}><ClipboardCheck size={16} /> {busy ? "Đang lưu..." : kl ? "Cập nhật kết luận" : "Kết luận & hoàn tất khám"}</Btn>
+            <Btn kind={deNghiNV ? "lav" : "mint"} disabled={busy || (deNghiNV && nvDaChot)} onClick={save}>
+              {deNghiNV ? <BedDouble size={16} /> : <ClipboardCheck size={16} />}
+              {busy ? "Đang gửi..." : deNghiNV
+                ? (yc ? "Ký lại yêu cầu nhập viện" : "Ký và gửi yêu cầu nhập viện")
+                : kl ? "Cập nhật kết luận" : "Kết luận & hoàn tất khám"}
+            </Btn>
           </div>
         </div>
       )}

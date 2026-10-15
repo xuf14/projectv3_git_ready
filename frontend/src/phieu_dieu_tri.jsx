@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { ClipboardList, Clock, Plus, Stethoscope, User } from "lucide-react";
+import { ArrowRightLeft, Ban, Check, ClipboardList, Clock, Plus, Stethoscope, User } from "lucide-react";
 import { T, store, api, useNav, Btn, Card, Pill, PageTitle, input } from "./shared";
 
 // ============================================================================
@@ -7,14 +7,24 @@ import { T, store, api, useNav, Btn, Card, Pill, PageTitle, input } from "./shar
 //  Chọn phiếu khám bệnh của bệnh nhân (liên kết từ thongtinbenhnhan), rồi thêm các
 //  mốc diễn biến. Lưu vào bảng dien_bien_dieu_tri qua:
 //    POST /treatment/progress, GET /treatment/progress/:phieuKhamId
+//
+//  CHUYỂN KHOA ĐIỀU TRỊ — bác sĩ hoặc lễ tân đề nghị chuyển người bệnh sang khoa
+//  khác; bác sĩ của khoa đến tiếp nhận hoặc từ chối. Máy chủ chốt toàn bộ điều
+//  kiện (khoa đến phải khác khoa hiện tại, mỗi phiếu khám một đề nghị đang chờ,
+//  chỉ khoa đến được tiếp nhận) — giao diện chỉ phản ánh lại.
+//    POST /treatment/chuyen-khoa, GET /treatment/chuyen-khoa?phieu_kham_id=
+//    POST /treatment/chuyen-khoa/:id/tiep-nhan, .../ket-thuc
 // ============================================================================
 
 const inp = { ...input, padding: "11px 13px", fontSize: 14, borderRadius: 11 };
 const fmtNgay = (d) => { const x = new Date(d); return isNaN(x) ? "" : x.toLocaleString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); };
+const TONE_CK = { cho_tiep_nhan: T.gold, da_tiep_nhan: T.mint, tu_choi: T.peach, da_huy: T.sub };
 
 export default function PhieuDieuTri() {
   const { online } = useNav();
   const live = online && !!store.token;
+  const vaiTro = (store.user && store.user.vai_tro) || "";
+  const laBacSi = vaiTro === "bac_si" || vaiTro === "admin";
   const [sheets, setSheets] = useState([]);
   const [phieuKhamId, setPhieuKhamId] = useState("");
   const [progress, setProgress] = useState([]);
@@ -50,12 +60,12 @@ export default function PhieuDieuTri() {
 
   if (!live) {
     return (<div><PageTitle title="Phiếu theo dõi điều trị" sub="Ghi diễn biến bệnh của bệnh nhân." />
-      <Card style={{ padding: 40, textAlign: "center", color: T.sub }}>Cần đăng nhập tài khoản bác sĩ.</Card></div>);
+      <Card style={{ padding: 40, textAlign: "center", color: T.sub }}>Cần đăng nhập tài khoản bác sĩ hoặc lễ tân.</Card></div>);
   }
 
   return (
     <div>
-      <PageTitle title="Phiếu theo dõi điều trị" sub="Ghi lại diễn biến bệnh theo thời gian và chỉ định — liên kết với phiếu khám của bệnh nhân." />
+      <PageTitle title="Phiếu theo dõi điều trị" sub="Diễn biến bệnh theo thời gian, chỉ định và chuyển khoa điều trị — liên kết với phiếu khám của bệnh nhân." />
 
       {msg && <Card style={{ padding: 14, marginBottom: 16, border: "none", fontSize: 14,
         background: msg.type === "ok" ? T.mintSoft : "#FDECEA", color: msg.type === "ok" ? "#2F8F73" : "#C0392B" }}>{msg.text}</Card>}
@@ -74,7 +84,9 @@ export default function PhieuDieuTri() {
         </div>}
       </Card>
 
-      {phieuKhamId && (
+      {phieuKhamId && <ChuyenKhoa phieuKhamId={phieuKhamId} laBacSi={laBacSi} />}
+
+      {phieuKhamId && laBacSi && (
         <Card style={{ padding: 20, marginBottom: 20 }}>
           <div style={{ fontWeight: 800, color: T.ink, fontSize: 15, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}><Plus size={17} color={T.sky} /> Thêm diễn biến</div>
           <div style={{ display: "grid", gap: 12 }}>
@@ -114,5 +126,153 @@ export default function PhieuDieuTri() {
         </Card>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+//  CHUYỂN KHOA ĐIỀU TRỊ — bác sĩ điều trị hoặc lễ tân lập đề nghị chuyển người
+//  bệnh sang khoa khác; bác sĩ CỦA KHOA ĐẾN tiếp nhận hoặc từ chối. Mọi điều kiện
+//  do máy chủ chốt, nút bấm ở đây chỉ là phản ánh trạng thái.
+// ---------------------------------------------------------------------------
+function ChuyenKhoa({ phieuKhamId, laBacSi }) {
+  const { departments } = useNav();
+  const [list, setList] = useState([]);
+  const [khoaDenId, setKhoaDenId] = useState("");
+  const [lyDo, setLyDo] = useState("");
+  const [tinhTrang, setTinhTrang] = useState("");
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [dong, setDong] = useState(null);        // phiếu đang chờ nhập lý do từ chối/hủy
+  const [lyDoDong, setLyDoDong] = useState("");
+
+  const nap = () => api.chuyenKhoaList({ phieu_kham_id: phieuKhamId })
+    .then((r) => setList(Array.isArray(r) ? r : [])).catch(() => setList([]));
+  useEffect(() => { setMsg(null); setDong(null); setLyDoDong(""); nap(); }, [phieuKhamId]);
+
+  // Danh mục khoa lấy từ backend mới có id thật (dbId); bỏ dữ liệu mock
+  const khoa = departments.filter((k) => k.dbId);
+  const dangCho = list.find((c) => c.trang_thai === "cho_tiep_nhan") || null;
+  const daNhan = list.find((c) => c.trang_thai === "da_tiep_nhan") || null;
+  const khoaHienTai = daNhan ? daNhan.khoa_den : (list.length ? list[0].khoa_di : null);
+
+  const chay = async (fn, okText) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); setMsg({ type: "ok", text: okText }); await nap(); }
+    catch (e) { setMsg({ type: "err", text: e.message }); }
+    finally { setBusy(false); }
+  };
+
+  const deNghi = () => {
+    if (!khoaDenId) { setMsg({ type: "err", text: "Chọn khoa tiếp nhận người bệnh." }); return; }
+    if (!lyDo.trim()) { setMsg({ type: "err", text: "Nhập lý do chuyển khoa." }); return; }
+    chay(async () => {
+      await api.chuyenKhoaTao({
+        phieu_kham_id: phieuKhamId, khoa_den_id: khoaDenId,
+        ly_do: lyDo, tinh_trang_nb: tinhTrang || undefined,
+      });
+      setKhoaDenId(""); setLyDo(""); setTinhTrang("");
+    }, "Đã gửi đề nghị chuyển khoa — chờ khoa đến tiếp nhận.");
+  };
+
+  const xacNhanDong = () => {
+    if (!lyDoDong.trim()) { setMsg({ type: "err", text: "Phải ghi rõ lý do." }); return; }
+    const { id, trang_thai } = dong;
+    chay(async () => {
+      await api.chuyenKhoaKetThuc(id, { trang_thai, ly_do_ket_thuc: lyDoDong });
+      setDong(null); setLyDoDong("");
+    }, trang_thai === "tu_choi" ? "Đã từ chối phiếu chuyển khoa." : "Đã hủy phiếu chuyển khoa.");
+  };
+
+  return (
+    <Card style={{ padding: 20, marginBottom: 20 }}>
+      <div style={{ fontWeight: 800, color: T.ink, fontSize: 15, marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
+        <ArrowRightLeft size={17} color={T.lav} /> Chuyển khoa điều trị
+      </div>
+      <div style={{ fontSize: 13, color: T.sub, marginBottom: 14 }}>
+        {khoaHienTai
+          ? <>Khoa đang điều trị: <b style={{ color: T.ink }}>{khoaHienTai.ten_khoa}</b>. </>
+          : <>Khoa đang điều trị do máy chủ xác định theo lần khám của phiếu này. </>}
+        Việc chuyển chỉ có hiệu lực khi bác sĩ của khoa đến xác nhận tiếp nhận.
+      </div>
+
+      {msg && <div style={{ padding: "10px 13px", marginBottom: 14, borderRadius: 11, fontSize: 13.5,
+        background: msg.type === "ok" ? T.mintSoft : "#FDECEA", color: msg.type === "ok" ? "#2F8F73" : "#C0392B" }}>{msg.text}</div>}
+
+      {dangCho ? (
+        <div style={{ padding: "12px 14px", background: T.goldSoft, borderRadius: 12, fontSize: 13.5, color: T.ink, marginBottom: 14 }}>
+          Phiếu <b>{dangCho.ma_phieu}</b> đang chờ {dangCho.khoa_den ? dangCho.khoa_den.ten_khoa : "khoa đến"} tiếp nhận.
+          Xử lý xong phiếu này mới lập được đề nghị mới.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 12, marginBottom: 14 }}>
+          <label style={{ display: "block", maxWidth: 380 }}>
+            <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "block", marginBottom: 5 }}>Khoa tiếp nhận *</span>
+            <select style={inp} value={khoaDenId} onChange={(e) => setKhoaDenId(e.target.value)}>
+              <option value="">— Chọn khoa —</option>
+              {khoa.map((k) => <option key={k.dbId} value={k.dbId}>{k.name}</option>)}
+            </select>
+          </label>
+          <label style={{ display: "block" }}>
+            <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "block", marginBottom: 5 }}>Lý do chuyển khoa *</span>
+            <textarea style={{ ...inp, resize: "vertical" }} rows={2} value={lyDo} onChange={(e) => setLyDo(e.target.value)}
+              placeholder="VD: Cần theo dõi chuyên sâu sản bệnh lý, vượt khả năng chuyên môn của khoa hiện tại..." />
+          </label>
+          <label style={{ display: "block" }}>
+            <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "block", marginBottom: 5 }}>Tình trạng người bệnh khi chuyển</span>
+            <textarea style={{ ...inp, resize: "vertical" }} rows={2} value={tinhTrang} onChange={(e) => setTinhTrang(e.target.value)}
+              placeholder="Toàn trạng, sinh hiệu, thuốc đang dùng, lưu ý khi bàn giao..." />
+          </label>
+          <div><Btn kind="lav" disabled={busy} onClick={deNghi}><ArrowRightLeft size={16} /> {busy ? "Đang gửi..." : "Đề nghị chuyển khoa"}</Btn></div>
+        </div>
+      )}
+
+      {list.length > 0 && (
+        <div style={{ borderTop: `1px solid ${T.line}`, paddingTop: 14 }}>
+          <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 700, marginBottom: 10 }}>Lịch sử chuyển khoa ({list.length})</div>
+          {list.map((c) => (
+            <div key={c.id} style={{ padding: "12px 14px", background: T.bg, borderRadius: 12, marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+                <Pill tone={TONE_CK[c.trang_thai] || T.sub}>{c.nhan_trang_thai}</Pill>
+                <span style={{ fontSize: 13.5, color: T.ink, fontWeight: 700 }}>
+                  {c.khoa_di ? c.khoa_di.ten_khoa : "Chưa xác định"} → {c.khoa_den ? c.khoa_den.ten_khoa : "—"}
+                </span>
+                <span style={{ fontSize: 12, color: T.sub }}>{c.ma_phieu} · {fmtNgay(c.thoi_gian_tao)}</span>
+              </div>
+              <div style={{ fontSize: 13.5, color: T.ink, whiteSpace: "pre-wrap" }}>Lý do: {c.ly_do}</div>
+              {c.tinh_trang_nb && <div style={{ fontSize: 13, color: T.sub, whiteSpace: "pre-wrap", marginTop: 4 }}>Tình trạng: {c.tinh_trang_nb}</div>}
+              {c.ly_do_ket_thuc && <div style={{ fontSize: 13, color: T.peach, whiteSpace: "pre-wrap", marginTop: 4 }}>Lý do đóng phiếu: {c.ly_do_ket_thuc}</div>}
+              <div style={{ fontSize: 12, color: T.sub, marginTop: 6 }}>
+                Người lập: {c.nguoi_tao ? c.nguoi_tao.ho_ten : "—"}
+                {c.nguoi_xu_ly ? ` · Người xử lý: ${c.nguoi_xu_ly.ho_ten} (${fmtNgay(c.thoi_gian_xu_ly)})` : ""}
+              </div>
+
+              {c.trang_thai === "cho_tiep_nhan" && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                  {laBacSi && <Btn kind="mint" size="sm" disabled={busy}
+                    onClick={() => chay(() => api.chuyenKhoaTiepNhan(c.id), "Đã tiếp nhận người bệnh về khoa.")}><Check size={15} /> Tiếp nhận</Btn>}
+                  {laBacSi && <Btn kind="ghost" size="sm" disabled={busy}
+                    onClick={() => { setDong({ id: c.id, trang_thai: "tu_choi" }); setLyDoDong(""); setMsg(null); }}><Ban size={15} /> Từ chối</Btn>}
+                  <Btn kind="ghost" size="sm" disabled={busy}
+                    onClick={() => { setDong({ id: c.id, trang_thai: "da_huy" }); setLyDoDong(""); setMsg(null); }}>Hủy phiếu</Btn>
+                </div>
+              )}
+
+              {dong && dong.id === c.id && (
+                <div style={{ marginTop: 10, padding: 12, background: T.surface, border: `1px solid ${T.line}`, borderRadius: 11 }}>
+                  <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "block", marginBottom: 5 }}>
+                    Lý do {dong.trang_thai === "tu_choi" ? "khoa đến từ chối" : "hủy phiếu"} *
+                  </span>
+                  <textarea style={{ ...inp, resize: "vertical" }} rows={2} value={lyDoDong} onChange={(e) => setLyDoDong(e.target.value)} />
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <Btn kind="primary" size="sm" disabled={busy} onClick={xacNhanDong}>Xác nhận</Btn>
+                    <Btn kind="ghost" size="sm" disabled={busy} onClick={() => { setDong(null); setLyDoDong(""); }}>Bỏ qua</Btn>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }

@@ -5,9 +5,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, EntityManager } from 'typeorm';
 import {
-  PhieuYLenh, ChiTietYLenh, DienBienDieuTri, LanThuTienYLenh, PhieuKhamBenh, NhatKyHoatDong, VaiTro,
+  PhieuYLenh, ChiTietYLenh, DienBienDieuTri, LanThuTienYLenh, PhieuKhamBenh, ChiDinhCLS,
+  LuotKham, NhatKyHoatDong, TonKho, VaiTro,
 } from './entities';
 import { JwtAuthGuard, RolesGuard, Roles } from './auth';
+import { KhoService } from './kho.module';
 
 const LOAI_HOP_LE = ['thuoc', 'vat_tu', 'dich_vu'];
 
@@ -50,10 +52,11 @@ export class YLenhService {
     @InjectRepository(DienBienDieuTri) private db: Repository<DienBienDieuTri>,
     @InjectRepository(PhieuKhamBenh) private pk: Repository<PhieuKhamBenh>,
     private ds: DataSource,
+    private kho: KhoService,
   ) {}
 
   private layChiTiet(id: number) {
-    return this.yl.findOne({ where: { id }, relations: ['nguoi_tao', 'phieu_kham', 'chi_tiet', 'lan_thu', 'lan_thu.nguoi_thu'] });
+    return this.yl.findOne({ where: { id }, relations: ['nguoi_tao', 'phieu_kham', 'phieu_kham.ho_so', 'chi_tiet', 'lan_thu', 'lan_thu.nguoi_thu'] });
   }
 
   private ghiNhatKy(m: EntityManager, userId: number, hanhDong: string, noiDung: string) {
@@ -84,29 +87,33 @@ export class YLenhService {
     const ngay_yl = this.ngayHopLe(dto?.ngay_yl, 'ngay_yl');
     const ngay_cdht = this.ngayHopLe(dto?.ngay_cdht, 'ngay_cdht');
 
-    const id = await this.ds.transaction(async (m) => {
-      let phieu_kham: PhieuKhamBenh | null = null;
-      if (dto?.phieu_kham_id) {
-        phieu_kham = await m.findOne(PhieuKhamBenh, { where: { id: +dto.phieu_kham_id } });
-        if (!phieu_kham) throw new NotFoundException('Phiếu khám bệnh liên kết không tồn tại');
-      }
+    // Bắt buộc liên kết phiếu khám bệnh để phiếu y lệnh luôn gắn với bệnh nhân
+    // (tránh dữ liệu viện phí không có tên bệnh nhân).
+    if (!dto?.phieu_kham_id)
+      throw new BadRequestException('Cần chọn phiếu khám bệnh của bệnh nhân để liên kết phiếu y lệnh');
+    const ketQua = await this.ds.transaction(async (m) => {
+      const phieu_kham = await m.findOne(PhieuKhamBenh, { where: { id: +dto.phieu_kham_id } });
+      if (!phieu_kham) throw new NotFoundException('Phiếu khám bệnh liên kết không tồn tại');
       const yLenh = m.create(PhieuYLenh, {
         ma_phieu: 'YL' + Date.now().toString().slice(-9),
         ngay_yl, bs_dt, ngay_cdht, tong_tien, da_nop, tra_lai, ghi_chu,
         trang_thai: trangThaiThu(tong_tien, da_nop),
-        phieu_kham: phieu_kham || undefined,
+        phieu_kham,
         nguoi_tao: { id: userId } as any,
         chi_tiet: dong.map((d) => m.create(ChiTietYLenh, d)),
         // Khoản nộp ban đầu (nếu có) là một lần thu do chính lễ tân lập phiếu xác nhận
         lan_thu: da_nop > 0 ? [m.create(LanThuTienYLenh, { so_tien: da_nop, nguoi_thu: { id: userId } as any })] : [],
       });
       const saved = await m.save(yLenh);
+      // Xuất kho ngay trong transaction: thiếu tồn thì hủy luôn cả phiếu
+      const kho = await this.kho.xuatKhoTheoYLenh(m, userId, dong, saved.ma_phieu);
       await this.ghiNhatKy(m, userId, 'tao_y_lenh',
-        `Lập phiếu y lệnh ${saved.ma_phieu} (${dong.length} dòng, tổng ${tong_tien}đ, đã nộp ${da_nop}đ)`);
-      return saved.id;
+        `Lập phiếu y lệnh ${saved.ma_phieu} (${dong.length} dòng, tổng ${tong_tien}đ, đã nộp ${da_nop}đ` +
+        `${kho.da_xuat.length ? `, xuất kho ${kho.da_xuat.length} mặt hàng` : ''})`);
+      return { id: saved.id, kho };
     });
     // Nạp lại sau khi transaction đã commit để có đủ quan hệ (tên người thu...)
-    return this.chiTietYLenh(id);
+    return { ...(await this.chiTietYLenh(ketQua.id)), kho: ketQua.kho };
   }
 
   // Lễ tân xác nhận thu thêm tiền cho phiếu chưa nộp đủ (nộp nhiều lần)
@@ -134,8 +141,11 @@ export class YLenhService {
   async danhSachYLenh(tu?: string, den?: string, q?: string) {
     const qb = this.yl.createQueryBuilder('y')
       .leftJoinAndSelect('y.phieu_kham', 'pk')
+      .leftJoinAndSelect('pk.ho_so', 'hs')
       .leftJoinAndSelect('y.nguoi_tao', 'nt')
       .leftJoinAndSelect('y.chi_tiet', 'ct')
+      .leftJoinAndSelect('y.lan_thu', 'lt')
+      .leftJoinAndSelect('lt.nguoi_thu', 'ltu')
       .orderBy('y.ngay_tao', 'DESC').take(100);
     const parseTs = (v?: string) => { if (!v) return null; const d = new Date(v); return isNaN(d.getTime()) ? null : d; };
     const tuTs = parseTs(tu), denTs = parseTs(den);
@@ -150,7 +160,9 @@ export class YLenhService {
       con_lai: Math.max(0, y.tong_tien - y.da_nop), trang_thai: y.trang_thai, ngay_tao: y.ngay_tao,
       so_dong: y.chi_tiet ? y.chi_tiet.length : 0,
       ten_bn: y.phieu_kham ? y.phieu_kham.ten_bn : null,
+      ma_benh_nhan: y.phieu_kham && y.phieu_kham.ho_so ? y.phieu_kham.ho_so.ma_benh_nhan : null,
       nguoi_tao: y.nguoi_tao ? y.nguoi_tao.ho_ten : null,
+      nguoi_thu: this.nguoiThuGanNhat(y),
     }));
   }
 
@@ -158,6 +170,12 @@ export class YLenhService {
     const y = await this.layChiTiet(id);
     if (!y) throw new NotFoundException('Phiếu y lệnh không tồn tại');
     return this.goiYLenh(y);
+  }
+
+  // Người thu tiền của lần thu gần nhất (hiển thị trên phiếu & danh sách)
+  private nguoiThuGanNhat(y: PhieuYLenh): string | null {
+    const ls = (y.lan_thu || []).slice().sort((a, b) => b.id - a.id);
+    return ls.length && ls[0].nguoi_thu ? ls[0].nguoi_thu.ho_ten : null;
   }
 
   private goiYLenh(y: PhieuYLenh) {
@@ -168,9 +186,11 @@ export class YLenhService {
       ghi_chu: y.ghi_chu, ngay_tao: y.ngay_tao,
       phieu_kham: y.phieu_kham
         ? { id: y.phieu_kham.id, ten_bn: y.phieu_kham.ten_bn, ma_kcb: y.phieu_kham.ma_kcb,
-            so_benh_an: y.phieu_kham.so_benh_an, chan_doan_so_bo: y.phieu_kham.chan_doan_so_bo }
+            so_benh_an: y.phieu_kham.so_benh_an, chan_doan_so_bo: y.phieu_kham.chan_doan_so_bo,
+            ma_benh_nhan: y.phieu_kham.ho_so ? y.phieu_kham.ho_so.ma_benh_nhan : null }
         : null,
       nguoi_tao: y.nguoi_tao ? { id: y.nguoi_tao.id, ho_ten: y.nguoi_tao.ho_ten } : null,
+      nguoi_thu: this.nguoiThuGanNhat(y),
       chi_tiet: (y.chi_tiet || []).map((c) => ({
         id: c.id, loai: c.loai, ma_vt: c.ma_vt, ten: c.ten, dvt: c.dvt, so_luong: c.so_luong,
         lieu_dung: c.lieu_dung, cach_dung: c.cach_dung, don_gia: c.don_gia, ty_le: c.ty_le, thanh_tien: c.thanh_tien,
@@ -179,6 +199,113 @@ export class YLenhService {
         id: l.id, so_tien: l.so_tien, thoi_gian: l.thoi_gian,
         nguoi_thu: l.nguoi_thu ? l.nguoi_thu.ho_ten : null,
       })),
+    };
+  }
+
+  // Giá dịch vụ cận lâm sàng dùng cho phiếu viện phí. Ưu tiên giá danh mục nếu
+  // chỉ định gắn với dịch vụ có giá; nếu không, dùng giá TẠM THỜI (placeholder)
+  // theo loại — sinh tất định từ id để ổn định giữa các lần tải (không đổi ngẫu
+  // nhiên mỗi lần mở phiếu). TODO: thay bằng bảng giá dịch vụ thật khi có.
+  private giaChiDinh(cd: ChiDinhCLS): number {
+    if (cd.dich_vu && cd.dich_vu.gia > 0) return cd.dich_vu.gia;
+    const dai: Record<string, [number, number]> = {
+      xet_nghiem: [80000, 260000], sieu_am: [150000, 520000], thu_thuat: [300000, 1200000],
+    };
+    const [min, max] = dai[cd.loai] || [100000, 300000];
+    const buoc = 10000;
+    const soBuoc = Math.floor((max - min) / buoc) + 1;
+    const h = (cd.id * 2654435761) >>> 0; // hash tất định từ id
+    return min + (h % soBuoc) * buoc;
+  }
+
+  // Chỉ định cận lâm sàng của lần khám gắn với phiếu khám bệnh — trả về dưới dạng
+  // các dòng dịch vụ sẵn sàng đưa vào "Chi tiết viện phí" của phiếu y lệnh.
+  // Ưu tiên lần khám (lich_hen) liên kết trực tiếp; nếu phiếu khám chỉ gắn bệnh
+  // nhân (ho_so), lấy chỉ định của lần khám gần nhất của bệnh nhân đó có CLS.
+  async chiDinhTheoPhieuKham(phieuKhamId: number) {
+    const pk = await this.pk.findOne({ where: { id: phieuKhamId }, relations: ['lich_hen', 'ho_so'] });
+    if (!pk) throw new NotFoundException('Phiếu khám bệnh không tồn tại');
+    const clsRepo = this.ds.getRepository(ChiDinhCLS);
+    let lich = pk.lich_hen || null;
+    if (!lich && pk.ho_so) {
+      const gan = await clsRepo.findOne({
+        where: { lich_hen: { ho_so: { id: pk.ho_so.id } } },
+        relations: ['lich_hen'], order: { id: 'DESC' },
+      });
+      lich = gan ? gan.lich_hen : null;
+    }
+    if (!lich) return { lich_hen: null, chi_tiet: [] };
+    const ds = await clsRepo.find({
+      where: { lich_hen: { id: lich.id } }, relations: ['dich_vu'], order: { id: 'ASC' },
+    });
+    const chi_tiet = ds.map((cd) => {
+      const don_gia = this.giaChiDinh(cd);
+      return {
+        loai: 'dich_vu', ten: cd.ten_chi_dinh, ma_vt: 'CLS' + cd.id, dvt: 'Lần',
+        so_luong: 1, lieu_dung: null, cach_dung: null, don_gia, ty_le: 100,
+        thanh_tien: don_gia, loai_cls: cd.loai, trang_thai: cd.trang_thai,
+      };
+    });
+    return { lich_hen: { id: lich.id, ma_lich_hen: lich.ma_lich_hen }, chi_tiet };
+  }
+
+  // Đơn thuốc bác sĩ đã kê ở lần khám gắn với phiếu khám bệnh — trả về các dòng
+  // thuốc sẵn sàng đưa vào "Chi tiết viện phí", đơn giá điền sẵn từ thẻ kho tủ
+  // thuốc (lễ tân vẫn sửa được trên phiếu nếu cần).
+  // Chỉ đọc bản JSON do bác sĩ chọn từ danh mục — KHÔNG suy đoán từ đơn chữ cũ.
+  async donThuocTheoPhieuKham(phieuKhamId: number) {
+    const pk = await this.pk.findOne({ where: { id: phieuKhamId }, relations: ['lich_hen', 'ho_so'] });
+    if (!pk) throw new NotFoundException('Phiếu khám bệnh không tồn tại');
+    const luotRepo = this.ds.getRepository(LuotKham);
+    let luot = pk.lich_hen
+      ? await luotRepo.findOne({
+          where: { lich_hen: { id: pk.lich_hen.id } }, relations: ['don_thuoc', 'bac_si'], order: { id: 'DESC' },
+        })
+      : null;
+    if (!luot && pk.ho_so) {
+      luot = await luotRepo.findOne({
+        where: { lich_hen: { ho_so: { id: pk.ho_so.id } } }, relations: ['don_thuoc', 'bac_si'], order: { id: 'DESC' },
+      });
+    }
+    const don = luot && luot.don_thuoc;
+    if (!luot || !don || !don.danh_sach_json) return { luot_kham: null, chi_tiet: [] };
+
+    let dong: any[] = [];
+    try {
+      const parsed = JSON.parse(don.danh_sach_json);
+      if (Array.isArray(parsed)) dong = parsed;
+    } catch {
+      return { luot_kham: null, chi_tiet: [] };  // dữ liệu hỏng thì báo rỗng, không đoán
+    }
+    // Đơn giá lấy từ thẻ kho của tủ thuốc; mặt hàng chưa có thẻ hoặc chưa đặt
+    // giá thì để 0 để lễ tân nhập tay — không suy đoán giá.
+    const theKho = await this.ds.getRepository(TonKho).find({ where: { loai: 'thuoc' } });
+    const giaKho = new Map(theKho.map((k) => [k.ma, k]));
+
+    const chi_tiet = dong
+      .map((t, i) => {
+        // Ưu tiên mã danh mục thuốc để lễ tân trừ đúng tủ thuốc; đơn thuốc cũ
+        // chưa có mã thì giữ mã tham chiếu lượt khám (dòng không theo dõi tồn).
+        const maThuoc = t?.ma_thuoc ? String(t.ma_thuoc) : null;
+        const the = maThuoc ? giaKho.get(maThuoc) : undefined;
+        const so_luong = Number(t?.so_luong) > 0 ? Number(t.so_luong) : 1;
+        const don_gia = the ? the.don_gia : 0;
+        return {
+          loai: 'thuoc', ten: String(t?.ten || '').trim(),
+          ma_vt: maThuoc || `DT${luot!.id}-${i + 1}`,
+          dvt: t?.dvt || (the ? the.dvt : null), so_luong,
+          lieu_dung: t?.lieu_dung || null, cach_dung: t?.cach_dung || null,
+          don_gia, ty_le: 100, thanh_tien: Math.round(so_luong * don_gia),
+          ton_kho: the ? the.so_luong : null,
+        };
+      })
+      .filter((d) => d.ten);
+    return {
+      luot_kham: {
+        id: luot.id, thoi_gian: luot.thoi_gian, chan_doan: luot.chan_doan,
+        bac_si: luot.bac_si ? luot.bac_si.ho_ten : null,
+      },
+      chi_tiet,
     };
   }
 
@@ -213,6 +340,23 @@ export class YLenhService {
     return list.map((d) => this.goiDienBien(d));
   }
 
+  // Diễn biến điều trị của MỘT bệnh nhân — gộp qua tất cả phiếu khám của hồ sơ.
+  async danhSachDienBienTheoHoSo(hoSoId: number) {
+    const list = await this.db.createQueryBuilder('d')
+      .leftJoinAndSelect('d.bac_si', 'bs')
+      .leftJoinAndSelect('d.phieu_kham', 'pk')
+      .leftJoin('pk.ho_so', 'hs')
+      .where('hs.id = :id', { id: hoSoId })
+      .orderBy('d.id', 'DESC')
+      .getMany();
+    return list.map((d) => ({
+      ...this.goiDienBien(d),
+      phieu_kham: d.phieu_kham
+        ? { id: d.phieu_kham.id, ma_kcb: d.phieu_kham.ma_kcb, chan_doan_so_bo: d.phieu_kham.chan_doan_so_bo }
+        : null,
+    }));
+  }
+
   private goiDienBien(d: DienBienDieuTri) {
     return {
       id: d.id, thoi_diem: d.thoi_diem, dien_bien: d.dien_bien, chi_dinh: d.chi_dinh, ngay_tao: d.ngay_tao,
@@ -234,6 +378,18 @@ export class YLenhController {
     return this.svc.danhSachYLenh(tu, den, q);
   }
 
+  // Gợi ý chỉ định cận lâm sàng của phiếu khám để đưa vào chi tiết viện phí
+  @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
+  @Get('reception/y-lenh/cls/:phieuKhamId') clsPhieuKham(@Param('phieuKhamId') id: string) {
+    return this.svc.chiDinhTheoPhieuKham(+id);
+  }
+
+  // Đơn thuốc bác sĩ đã kê ở lần khám — nguồn để lễ tân nạp vào chi tiết viện phí
+  @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
+  @Get('reception/y-lenh/don-thuoc/:phieuKhamId') donThuocPhieuKham(@Param('phieuKhamId') id: string) {
+    return this.svc.donThuocTheoPhieuKham(+id);
+  }
+
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
   @Get('reception/y-lenh/:id') ctYLenh(@Param('id') id: string) { return this.svc.chiTietYLenh(+id); }
 
@@ -247,4 +403,7 @@ export class YLenhController {
 
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.BAC_SI, VaiTro.LE_TAN, VaiTro.ADMIN)
   @Get('treatment/progress/:phieuKhamId') dsDienBien(@Param('phieuKhamId') id: string) { return this.svc.danhSachDienBien(+id); }
+
+  @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.BAC_SI, VaiTro.LE_TAN, VaiTro.ADMIN)
+  @Get('treatment/progress-by-patient/:hoSoId') dsDienBienHoSo(@Param('hoSoId') id: string) { return this.svc.danhSachDienBienTheoHoSo(+id); }
 }

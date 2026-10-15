@@ -21,6 +21,7 @@ async function seed() {
     { ho_ten: 'Lễ tân Nguyễn Hoa', sdt: '0900000001', email: 'letan@demo.vn', mat_khau_hash: hash, vai_tro: VaiTro.LE_TAN },
     { ho_ten: 'BS.CKII Nguyễn Thị Lan', sdt: '0900000002', email: 'bacsi@demo.vn', mat_khau_hash: hash, vai_tro: VaiTro.BAC_SI },
     { ho_ten: 'Quản trị viên', sdt: '0900000003', email: 'admin@demo.vn', mat_khau_hash: hash, vai_tro: VaiTro.ADMIN },
+    { ho_ten: 'Ban Giám đốc', sdt: '0900000004', email: 'quanly@demo.vn', mat_khau_hash: hash, vai_tro: VaiTro.QUAN_LY },
   ]);
 
   // --- Khoa phòng ---
@@ -39,6 +40,17 @@ async function seed() {
     { ho_ten: 'BS.CKII Lê Hữu Phúc', hoc_ham: 'BS.CKII', chuyen_mon: 'IVF', so_nam_kn: 15, danh_gia: 4.9, khoa: khoa[2] },
     { ho_ten: 'BS.CKI Vũ Mai Anh', hoc_ham: 'BS.CKI', chuyen_mon: 'Sơ sinh', so_nam_kn: 10, danh_gia: 4.6, khoa: khoa[3] },
   ]);
+
+  // --- Tài khoản đăng nhập riêng cho từng bác sĩ (mật khẩu 123456) ---
+  // Email cố định bacsi{id}@demo.vn khớp ô chọn nhanh ở cổng đăng nhập bác sĩ;
+  // liên kết bac_si.nguoi_dung để cổng bác sĩ nhận diện đúng hồ sơ.
+  for (const bs of bacSi) {
+    const acc = await ds.getRepository(NguoiDung).save({
+      ho_ten: bs.ho_ten, email: `bacsi${bs.id}@demo.vn`, mat_khau_hash: hash, vai_tro: VaiTro.BAC_SI,
+    });
+    bs.nguoi_dung = acc;
+  }
+  await ds.getRepository(BacSi).save(bacSi);
 
   // --- Dịch vụ ---
   await ds.getRepository(DichVu).save([
@@ -76,6 +88,7 @@ async function seed() {
   console.log('   - Bệnh nhân:  benhnhan@demo.vn');
   console.log('   - Lễ tân:     letan@demo.vn');
   console.log('   - Bác sĩ:     bacsi@demo.vn');
+  console.log('   - Quản lý:    quanly@demo.vn');
   console.log('   - Admin:      admin@demo.vn');
   await ds.destroy();
 }

@@ -6,8 +6,11 @@ import { PassportStrategy } from '@nestjs/passport';
 import { AuthGuard } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { VaiTro } from './entities';
+import { bienBatBuoc } from './env';
 
-export const JWT_SECRET = process.env.JWT_SECRET || 'bv-phusan-hp-secret-key-2026';
+// Khóa ký JWT bắt buộc lấy từ .env — KHÔNG có giá trị mặc định trong mã nguồn,
+// vì bí mật nằm trong mã nguồn thì bất kỳ ai đọc được repo cũng giả mạo được token.
+export const JWT_SECRET = bienBatBuoc('JWT_SECRET', 16);
 
 // ---- JWT Strategy ----
 @Injectable()

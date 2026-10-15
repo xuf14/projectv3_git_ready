@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Search, UserPlus, User, Phone, CalendarCheck, CreditCard, ChevronLeft, Stethoscope,
-  CalendarClock, FileText, FlaskConical, Paperclip, Download,
+  CalendarClock, FileText, FlaskConical, Paperclip, Download, Upload, CheckCircle2,
 } from "lucide-react";
 import { T, store, api, useNav, Btn, Card, Pill, PageTitle, input } from "./shared";
 
@@ -248,11 +248,49 @@ function PatientDetail({ hs, appts, doctors, onBack, onUpdated }) {
   const [savingTk, setSavingTk] = useState(false);
   const [msgTk, setMsgTk] = useState(null);
 
+  // Lịch khám mới (bệnh nhân đến khám hôm nay) + tải tài liệu điều trị ngoại trú
+  const today = new Date().toLocaleDateString("en-CA");
+  const [loaiLich, setLoaiLich] = useState("khammoi"); // "khammoi" | "taikham"
+  const [nx, setNx] = useState({ bs_id: "", ngay: today });
+  const [nxLich, setNxLich] = useState(null);
+  const [nxMsg, setNxMsg] = useState(null);
+  const [nxSaving, setNxSaving] = useState(false);
+  const [docs, setDocs] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
+
   useEffect(() => {
     setInfo(null); setMsgTk(null);
     setTk({ ngay: hs.ngay_tai_kham || "", bs_id: (hs.bac_si_tai_kham && hs.bac_si_tai_kham.id) || "", ghi_chu: hs.ghi_chu_tai_kham || "" });
+    setLoaiLich("khammoi"); setNx({ bs_id: "", ngay: today }); setNxLich(null); setNxMsg(null); setDocs([]);
     api.revisitInfo(hs.id).then(setInfo).catch(() => setInfo({ lan_kham: [] }));
   }, [hs.id]);
+
+  const taoKhamMoi = async () => {
+    setNxMsg(null);
+    if (!nx.bs_id) { setNxMsg({ type: "err", text: "Vui lòng chọn bác sĩ khám." }); return; }
+    setNxSaving(true);
+    try {
+      const r = await api.createNewExam({ ho_so_id: hs.id, bac_si_id: nx.bs_id, ngay: nx.ngay || undefined });
+      setNxLich(r); setDocs([]);
+      setNxMsg({ type: "ok", text: `Đã tạo lịch khám ${r.ma_lich_hen} — bệnh nhân đã vào hàng chờ khám.` });
+    } catch (e) { setNxMsg({ type: "err", text: e.message }); }
+    finally { setNxSaving(false); }
+  };
+
+  const taiTaiLieu = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (fileRef.current) fileRef.current.value = "";
+    if (!file || !nxLich) return;
+    setNxMsg(null); setUploading(true);
+    try {
+      await api.uploadDocument(nxLich.id, file);
+      const list = await api.documents(nxLich.id);
+      setDocs(Array.isArray(list) ? list : []);
+      setNxMsg({ type: "ok", text: `Đã tải lên "${file.name}".` });
+    } catch (err) { setNxMsg({ type: "err", text: err.message }); }
+    finally { setUploading(false); }
+  };
 
   const luuTaiKham = async (xoa) => {
     setMsgTk(null);
@@ -268,7 +306,12 @@ function PatientDetail({ hs, appts, doctors, onBack, onUpdated }) {
     finally { setSavingTk(false); }
   };
 
-  const taiVe = (t) => api.downloadDocument(t.id, t.ten_tep).catch((e) => setMsgTk({ type: "err", text: e.message }));
+  const taiVe = (t) => api.downloadDocument(t.id).then((b) => {
+    const u = URL.createObjectURL(b);
+    const a = document.createElement("a");
+    a.href = u; a.download = t.ten_tep || "tai-lieu"; a.click();
+    setTimeout(() => URL.revokeObjectURL(u), 60000);
+  }).catch((e) => setMsgTk({ type: "err", text: e.message }));
 
   // Chỉ hiện các lần khám thực sự có dữ liệu phục vụ tái khám
   const lanCo = info && Array.isArray(info.lan_kham)
@@ -306,39 +349,105 @@ function PatientDetail({ hs, appts, doctors, onBack, onUpdated }) {
         </div>
       </Card>
 
-      {/* Hẹn tái khám — lễ tân note ngày; bác sĩ được chọn sẽ thấy thông báo */}
+      {/* Lịch khám: chọn Lịch khám mới (đến khám hôm nay) hoặc Lịch tái khám */}
       <Card style={{ padding: 22, marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
           <div style={{ fontWeight: 800, color: T.ink, fontSize: 16 }}>
             <CalendarClock size={17} style={{ verticalAlign: -3, marginRight: 8, color: T.gold }} />
-            Hẹn tái khám
+            Lịch khám
           </div>
-          {hs.ngay_tai_kham && <Pill tone={T.gold} soft={T.goldSoft}>Đang hẹn: {fmtNgay(hs.ngay_tai_kham)}</Pill>}
-        </div>
-        {msgTk && (
-          <div style={{ padding: "10px 14px", borderRadius: 12, marginBottom: 12, fontSize: 13.5,
-            background: msgTk.type === "ok" ? T.mintSoft : "#FDECEA",
-            color: msgTk.type === "ok" ? "#1E7A5F" : "#C0392B" }}>{msgTk.text}</div>
-        )}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }} className="grid3">
-          <Field label="Ngày tái khám *">
-            <input type="date" style={inp} value={tk.ngay} onChange={(e) => setTk((s) => ({ ...s, ngay: e.target.value }))} />
-          </Field>
-          <Field label="Bác sĩ tái khám (được thông báo)">
-            <select style={inp} value={tk.bs_id} onChange={(e) => setTk((s) => ({ ...s, bs_id: e.target.value }))}>
-              <option value="">— Chưa chọn —</option>
-              {doctors.map((d) => <option key={d.id} value={d.id}>{tenBS(d)}</option>)}
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 13, color: T.sub, fontWeight: 600 }}>Loại lịch</span>
+            <select style={{ ...inp, width: "auto" }} value={loaiLich}
+              onChange={(e) => { setLoaiLich(e.target.value); setNxMsg(null); setMsgTk(null); }}>
+              <option value="khammoi">Lịch khám mới</option>
+              <option value="taikham">Lịch tái khám</option>
             </select>
-          </Field>
-          <Field label="Ghi chú chuẩn bị">
-            <input style={inp} value={tk.ghi_chu} placeholder="VD: mang toa thuốc cũ, phim X-quang…"
-              onChange={(e) => setTk((s) => ({ ...s, ghi_chu: e.target.value }))} />
-          </Field>
+          </label>
         </div>
-        <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
-          <Btn size="sm" onClick={() => luuTaiKham(false)} disabled={savingTk}>{savingTk ? "Đang lưu…" : "Lưu hẹn tái khám"}</Btn>
-          {hs.ngay_tai_kham && <Btn kind="ghost" size="sm" onClick={() => luuTaiKham(true)} disabled={savingTk}>Xóa hẹn</Btn>}
-        </div>
+
+        {loaiLich === "khammoi" ? (
+          <div>
+            <div style={{ fontSize: 13.5, color: T.sub, marginBottom: 12 }}>
+              Bệnh nhân đến khám hôm nay — chọn bác sĩ khám và tải lên thông tin điều trị ngoại trú (nếu có) từ nơi khác chuyển đến.
+            </div>
+            {nxMsg && (
+              <div style={{ padding: "10px 14px", borderRadius: 12, marginBottom: 12, fontSize: 13.5,
+                background: nxMsg.type === "ok" ? T.mintSoft : "#FDECEA",
+                color: nxMsg.type === "ok" ? "#1E7A5F" : "#C0392B" }}>{nxMsg.text}</div>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 14 }} className="grid2">
+              <Field label="Bác sĩ khám *">
+                <select style={inp} value={nx.bs_id} onChange={(e) => setNx((s) => ({ ...s, bs_id: e.target.value }))} disabled={!!nxLich}>
+                  <option value="">— Chọn bác sĩ —</option>
+                  {doctors.map((d) => <option key={d.id} value={d.id}>{tenBS(d)}</option>)}
+                </select>
+              </Field>
+              <Field label="Ngày khám">
+                <input type="date" style={inp} value={nx.ngay} onChange={(e) => setNx((s) => ({ ...s, ngay: e.target.value }))} disabled={!!nxLich} />
+              </Field>
+            </div>
+
+            {!nxLich ? (
+              <div style={{ marginTop: 14 }}>
+                <Btn size="sm" onClick={taoKhamMoi} disabled={nxSaving}>{nxSaving ? "Đang tạo…" : "Tạo lịch khám mới"}</Btn>
+              </div>
+            ) : (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
+                  <Pill tone={T.mint} soft={T.mintSoft}><CheckCircle2 size={12} style={{ verticalAlign: -2, marginRight: 4 }} />{nxLich.ma_lich_hen} · STT #{nxLich.so_thu_tu}</Pill>
+                  <span style={{ fontSize: 13.5, color: T.sub }}>{nxLich.bac_si}{nxLich.khoa ? ` — ${nxLich.khoa}` : ""} · đã vào hàng chờ khám</span>
+                  <Btn kind="ghost" size="sm" onClick={() => { setNxLich(null); setNx({ bs_id: "", ngay: today }); setDocs([]); setNxMsg(null); }}>Tạo lịch khác</Btn>
+                </div>
+                <div style={{ fontWeight: 700, color: T.ink, fontSize: 14, marginBottom: 8 }}>
+                  <Paperclip size={14} style={{ verticalAlign: -2, marginRight: 6, color: T.sky }} />
+                  Thông tin điều trị ngoại trú (PDF / Word, tối đa 10MB)
+                </div>
+                {docs.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                    {docs.map((t) => (
+                      <Btn key={t.id} kind="ghost" size="sm" onClick={() => api.downloadDocument(t.id).then((b) => { const u = URL.createObjectURL(b); const a = document.createElement("a"); a.href = u; a.download = t.ten_tep; a.click(); setTimeout(() => URL.revokeObjectURL(u), 60000); }).catch(() => {})}>
+                        <FileText size={13} style={{ verticalAlign: -2, marginRight: 6, color: T.sky }} />{t.ten_tep} ({fmtKB(t.kich_thuoc)})
+                      </Btn>
+                    ))}
+                  </div>
+                )}
+                <input ref={fileRef} type="file" accept=".pdf,.doc,.docx" style={{ display: "none" }} onChange={taiTaiLieu} />
+                <Btn kind="ghost" size="sm" onClick={() => fileRef.current && fileRef.current.click()} disabled={uploading}>
+                  <Upload size={14} style={{ verticalAlign: -2, marginRight: 6 }} />{uploading ? "Đang tải lên…" : "Tải tệp lên"}
+                </Btn>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div>
+            {hs.ngay_tai_kham && <div style={{ marginBottom: 12 }}><Pill tone={T.gold} soft={T.goldSoft}>Đang hẹn: {fmtNgay(hs.ngay_tai_kham)}</Pill></div>}
+            {msgTk && (
+              <div style={{ padding: "10px 14px", borderRadius: 12, marginBottom: 12, fontSize: 13.5,
+                background: msgTk.type === "ok" ? T.mintSoft : "#FDECEA",
+                color: msgTk.type === "ok" ? "#1E7A5F" : "#C0392B" }}>{msgTk.text}</div>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }} className="grid3">
+              <Field label="Ngày tái khám *">
+                <input type="date" style={inp} value={tk.ngay} onChange={(e) => setTk((s) => ({ ...s, ngay: e.target.value }))} />
+              </Field>
+              <Field label="Bác sĩ tái khám (được thông báo)">
+                <select style={inp} value={tk.bs_id} onChange={(e) => setTk((s) => ({ ...s, bs_id: e.target.value }))}>
+                  <option value="">— Chưa chọn —</option>
+                  {doctors.map((d) => <option key={d.id} value={d.id}>{tenBS(d)}</option>)}
+                </select>
+              </Field>
+              <Field label="Ghi chú chuẩn bị">
+                <input style={inp} value={tk.ghi_chu} placeholder="VD: mang toa thuốc cũ, phim X-quang…"
+                  onChange={(e) => setTk((s) => ({ ...s, ghi_chu: e.target.value }))} />
+              </Field>
+            </div>
+            <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
+              <Btn size="sm" onClick={() => luuTaiKham(false)} disabled={savingTk}>{savingTk ? "Đang lưu…" : "Lưu hẹn tái khám"}</Btn>
+              {hs.ngay_tai_kham && <Btn kind="ghost" size="sm" onClick={() => luuTaiKham(true)} disabled={savingTk}>Xóa hẹn</Btn>}
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* Thông tin phục vụ tái khám: sổ khám/toa thuốc cũ, kết quả CLS, tài liệu bệnh án */}

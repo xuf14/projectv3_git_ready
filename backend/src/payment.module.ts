@@ -5,7 +5,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import {
-  ThanhToan, ChiTietThanhToan, LichHen, DichVu, NhatKyHoatDong,
+  ThanhToan, ChiTietThanhToan, LichHen, DichVu, NhatKyHoatDong, HoSoBenhNhan,
+  PhieuYLenh, LanThuTienYLenh,
   TrangThaiThanhToan, TrangThaiLich, VaiTro,
 } from './entities';
 import { JwtAuthGuard, RolesGuard, Roles } from './auth';
@@ -19,6 +20,11 @@ export class PaymentService {
     @InjectRepository(ThanhToan) private tt: Repository<ThanhToan>,
     @InjectRepository(LichHen) private lich: Repository<LichHen>,
     @InjectRepository(DichVu) private dichVu: Repository<DichVu>,
+    // Tiền viện phí đến từ HAI nguồn: hóa đơn dịch vụ và phiếu y lệnh. Sổ thu và
+    // danh sách thanh toán phải gộp cả hai, nếu không lễ tân thu ở mục Y lệnh mà
+    // sổ thu trong ngày lại thiếu tiền.
+    @InjectRepository(PhieuYLenh) private yLenh: Repository<PhieuYLenh>,
+    @InjectRepository(LanThuTienYLenh) private lanThu: Repository<LanThuTienYLenh>,
     private ds: DataSource,
   ) {}
 
@@ -27,7 +33,26 @@ export class PaymentService {
     return this.dichVu.find({ relations: ['khoa'], order: { id: 'ASC' } });
   }
 
+  // Quan hệ cần nạp cho mọi truy vấn hóa đơn. khung_gio/luot_kham tuy khai báo
+  // eager nhưng TypeORM chỉ tự nạp eager ở entity gốc (ThanhToan) nên phải liệt kê.
+  private static readonly REL_HOA_DON = [
+    'lich_hen', 'lich_hen.ho_so', 'lich_hen.khoa',
+    'lich_hen.khung_gio', 'lich_hen.khung_gio.bac_si',
+    'lich_hen.luot_kham', 'lich_hen.luot_kham.bac_si',
+    'nguoi_tao', 'chi_tiet',
+  ];
+
+  // Bác sĩ khám: ưu tiên bác sĩ thực khám (lượt khám), nếu chưa khám thì lấy
+  // bác sĩ của khung giờ đã đặt.
+  private bacSiKham(t: ThanhToan) {
+    const lh: any = t.lich_hen;
+    const bs = (lh && lh.luot_kham && lh.luot_kham.bac_si) || (lh && lh.khung_gio && lh.khung_gio.bac_si);
+    if (!bs) return null;
+    return { id: bs.id, ho_ten: bs.ho_ten, hoc_ham: bs.hoc_ham || null, da_kham: !!(lh.luot_kham && lh.luot_kham.bac_si) };
+  }
+
   private goiTien(t: ThanhToan) {
+    const kg: any = t.lich_hen ? (t.lich_hen as any).khung_gio : null;
     return {
       id: t.id, ma_thanh_toan: t.ma_thanh_toan, tong_tien: t.tong_tien,
       trang_thai: t.trang_thai, ghi_chu: t.ghi_chu,
@@ -35,14 +60,66 @@ export class PaymentService {
       nguoi_tao: t.nguoi_tao ? { id: t.nguoi_tao.id, ho_ten: t.nguoi_tao.ho_ten } : null,
       lich_hen: t.lich_hen ? {
         id: t.lich_hen.id, ma_lich_hen: t.lich_hen.ma_lich_hen, trang_thai: t.lich_hen.trang_thai,
+        ho_so_id: t.lich_hen.ho_so ? t.lich_hen.ho_so.id : null,
         benh_nhan: t.lich_hen.ho_so ? t.lich_hen.ho_so.ho_ten : null,
         ma_benh_nhan: t.lich_hen.ho_so ? t.lich_hen.ho_so.ma_benh_nhan : null,
         khoa: t.lich_hen.khoa ? t.lich_hen.khoa.ten_khoa : null,
+        bac_si: this.bacSiKham(t),
+        ngay_kham: kg ? kg.ngay : null,
+        gio_kham: kg ? kg.gio_bat_dau : null,
       } : null,
       chi_tiet: (t.chi_tiet || [])
         .sort((a, b) => a.id - b.id)
         .map((c) => ({ id: c.id, ten_dich_vu: c.ten_dich_vu, don_gia: c.don_gia, so_luong: c.so_luong, thanh_tien: c.thanh_tien })),
     };
+  }
+
+  // ---- Nguồn thứ hai của sổ thu: phiếu y lệnh (thuốc, vật tư, dịch vụ) ----
+  // Quy MỘT LẦN THU của phiếu y lệnh về đúng hình dạng dòng hóa đơn để lễ tân và
+  // quản trị chỉ phải đọc một sổ. id có tiền tố "yl-" nên không bao giờ đụng id
+  // hóa đơn dịch vụ, và giao diện dựa vào trường `nguon` để không gọi nhầm API
+  // thu/hủy hóa đơn lên phiếu y lệnh.
+  private goiLanThu(l: LanThuTienYLenh) {
+    const y = l.y_lenh;
+    const pk = y ? y.phieu_kham : null;
+    const hs = pk ? pk.ho_so : null;
+    return {
+      id: `yl-${l.id}`, nguon: 'y_lenh' as const,
+      ma_thanh_toan: y ? y.ma_phieu : '—',
+      tong_tien: l.so_tien,
+      trang_thai: TrangThaiThanhToan.DA_THANH_TOAN,
+      ghi_chu: y ? y.ghi_chu : null,
+      ngay_tao: l.thoi_gian, ngay_thanh_toan: l.thoi_gian,
+      nguoi_tao: l.nguoi_thu ? { id: l.nguoi_thu.id, ho_ten: l.nguoi_thu.ho_ten } : null,
+      lich_hen: {
+        id: null as number | null, ma_lich_hen: y ? y.ma_phieu : null, trang_thai: null as string | null,
+        ho_so_id: hs ? hs.id : null,
+        benh_nhan: (pk && pk.ten_bn) || (hs && hs.ho_ten) || null,
+        ma_benh_nhan: hs ? hs.ma_benh_nhan : null,
+        khoa: pk ? pk.chuyen_khoa : null,
+        bac_si: y && y.bs_dt ? { id: null as number | null, ho_ten: y.bs_dt, hoc_ham: null, da_kham: true } : null,
+        ngay_kham: pk ? pk.ngay_kham : null, gio_kham: null as string | null,
+      },
+      // Một lần thu có thể chỉ là một phần phiếu — không liệt kê lại toàn bộ dòng
+      // thuốc/vật tư để tránh cộng trùng tiền trong phần gom theo bệnh nhân.
+      chi_tiet: [{
+        id: `yl-ct-${l.id}`, ten_dich_vu: `Thu tiền phiếu y lệnh ${y ? y.ma_phieu : ''}`.trim(),
+        don_gia: l.so_tien, so_luong: 1, thanh_tien: l.so_tien,
+      }],
+    };
+  }
+
+  // Các lần thu tiền y lệnh trong một ngày (theo thời điểm thu, không phải ngày lập)
+  private async lanThuTrongNgay(day: string) {
+    const list = await this.lanThu.createQueryBuilder('l')
+      .leftJoinAndSelect('l.y_lenh', 'y')
+      .leftJoinAndSelect('y.phieu_kham', 'pk')
+      .leftJoinAndSelect('pk.ho_so', 'hs')
+      .leftJoinAndSelect('l.nguoi_thu', 'nt')
+      .where('l.thoi_gian::date = :day', { day })
+      .orderBy('l.thoi_gian', 'DESC')
+      .getMany();
+    return list.map((l) => this.goiLanThu(l));
   }
 
   // Lễ tân lập hóa đơn cho một lịch hẹn ĐÃ KHÁM, gồm các dịch vụ đã chọn.
@@ -90,14 +167,14 @@ export class PaymentService {
         noi_dung: `Lập hóa đơn ${hoaDon.ma_thanh_toan} (${tong.toLocaleString('vi-VN')}đ) cho lịch hẹn ${lich.ma_lich_hen}`,
         nguoi_dung: { id: user.id } as any,
       }));
-      const full = await m.findOne(ThanhToan, { where: { id: hoaDon.id }, relations: ['lich_hen', 'lich_hen.ho_so', 'lich_hen.khoa', 'nguoi_tao', 'chi_tiet'] });
+      const full = await m.findOne(ThanhToan, { where: { id: hoaDon.id }, relations: PaymentService.REL_HOA_DON });
       return this.goiTien(full);
     });
   }
 
   // Lễ tân xác nhận bệnh nhân đã thanh toán tại quầy
   async xacNhanThanhToan(user: any, id: number) {
-    const t = await this.tt.findOne({ where: { id }, relations: ['lich_hen', 'lich_hen.ho_so', 'lich_hen.khoa', 'nguoi_tao', 'chi_tiet'] });
+    const t = await this.tt.findOne({ where: { id }, relations: PaymentService.REL_HOA_DON });
     if (!t) throw new NotFoundException('Không tìm thấy hóa đơn');
     if (t.trang_thai === TrangThaiThanhToan.DA_HUY) throw new BadRequestException('Hóa đơn đã bị hủy');
     if (t.trang_thai === TrangThaiThanhToan.DA_THANH_TOAN) return this.goiTien(t);
@@ -114,7 +191,7 @@ export class PaymentService {
 
   // Admin hủy hóa đơn (chỉ hóa đơn chưa thanh toán)
   async huyHoaDon(user: any, id: number) {
-    const t = await this.tt.findOne({ where: { id }, relations: ['lich_hen', 'lich_hen.ho_so', 'lich_hen.khoa', 'nguoi_tao', 'chi_tiet'] });
+    const t = await this.tt.findOne({ where: { id }, relations: PaymentService.REL_HOA_DON });
     if (!t) throw new NotFoundException('Không tìm thấy hóa đơn');
     if (t.trang_thai === TrangThaiThanhToan.DA_THANH_TOAN)
       throw new BadRequestException('Hóa đơn đã thanh toán, không thể hủy');
@@ -131,17 +208,60 @@ export class PaymentService {
   // Toàn bộ hóa đơn (lễ tân & admin)
   async danhSach() {
     const list = await this.tt.find({
-      relations: ['lich_hen', 'lich_hen.ho_so', 'lich_hen.khoa', 'nguoi_tao', 'chi_tiet'],
+      relations: PaymentService.REL_HOA_DON,
       order: { id: 'DESC' }, take: 200,
     });
-    return list.map((t) => this.goiTien(t));
+    // Kèm phiếu y lệnh để danh sách thanh toán phản ánh đủ tiền viện phí; thu tiền
+    // cho phiếu y lệnh vẫn làm ở mục Y lệnh (giao diện khóa nút theo `nguon`).
+    const yl = await this.yLenh.find({
+      relations: ['phieu_kham', 'phieu_kham.ho_so', 'nguoi_tao', 'chi_tiet', 'lan_thu'],
+      order: { id: 'DESC' }, take: 200,
+    });
+    return [
+      ...list.map((t) => this.goiTien(t)),
+      ...yl.map((y) => this.goiYLenh(y)),
+    ].sort((a, b) => new Date(b.ngay_tao as any).getTime() - new Date(a.ngay_tao as any).getTime());
+  }
+
+  // Một PHIẾU y lệnh (không phải từng lần thu) hiển thị trong danh sách thanh toán
+  private goiYLenh(y: PhieuYLenh) {
+    const pk = y.phieu_kham;
+    const hs = pk ? pk.ho_so : null;
+    const lanThuCuoi = (y.lan_thu || []).reduce<Date | null>(
+      (max, l) => (!max || new Date(l.thoi_gian) > new Date(max) ? l.thoi_gian : max), null);
+    return {
+      id: `yl-${y.id}`, nguon: 'y_lenh' as const,
+      ma_thanh_toan: y.ma_phieu, tong_tien: y.tong_tien,
+      da_nop: y.da_nop, con_lai: Math.max(0, y.tong_tien - y.da_nop),
+      // Chưa thu đủ vẫn xếp vào "chờ thanh toán" để lễ tân thấy khoản còn thiếu
+      trang_thai: y.trang_thai === 'da_du' ? TrangThaiThanhToan.DA_THANH_TOAN : TrangThaiThanhToan.CHO_THANH_TOAN,
+      ghi_chu: y.ghi_chu,
+      ngay_tao: y.ngay_tao,
+      // Giờ thu là lần thu GẦN NHẤT, không phải giờ lập phiếu — phiếu có thể thu
+      // làm nhiều lần vào những ngày khác nhau.
+      ngay_thanh_toan: y.trang_thai === 'da_du' ? lanThuCuoi : null,
+      nguoi_tao: y.nguoi_tao ? { id: y.nguoi_tao.id, ho_ten: y.nguoi_tao.ho_ten } : null,
+      lich_hen: {
+        id: null as number | null, ma_lich_hen: y.ma_phieu, trang_thai: null as string | null,
+        ho_so_id: hs ? hs.id : null,
+        benh_nhan: (pk && pk.ten_bn) || (hs && hs.ho_ten) || null,
+        ma_benh_nhan: hs ? hs.ma_benh_nhan : null,
+        khoa: pk ? pk.chuyen_khoa : null,
+        bac_si: y.bs_dt ? { id: null as number | null, ho_ten: y.bs_dt, hoc_ham: null, da_kham: true } : null,
+        ngay_kham: pk ? pk.ngay_kham : null, gio_kham: null as string | null,
+      },
+      chi_tiet: (y.chi_tiet || []).sort((a, b) => a.id - b.id).map((c) => ({
+        id: `yl-ct-${c.id}`, ten_dich_vu: c.ten, don_gia: c.don_gia,
+        so_luong: c.so_luong, thanh_tien: c.thanh_tien,
+      })),
+    };
   }
 
   // Hóa đơn của một lịch hẹn — nhân viên xem bất kỳ; bệnh nhân chỉ xem của mình
   async choLichHen(user: any, lichId: number) {
     const list = await this.tt.find({
       where: { lich_hen: { id: lichId } },
-      relations: ['lich_hen', 'lich_hen.ho_so', 'lich_hen.ho_so.nguoi_dung', 'lich_hen.khoa', 'nguoi_tao', 'chi_tiet'],
+      relations: [...PaymentService.REL_HOA_DON, 'lich_hen.ho_so.nguoi_dung'],
       order: { id: 'DESC' },
     });
     if (!laNhanVien(user.vai_tro)) {
@@ -155,7 +275,7 @@ export class PaymentService {
   async cuaBenhNhan(userId: number) {
     const list = await this.tt.find({
       where: { lich_hen: { ho_so: { nguoi_dung: { id: userId } } } },
-      relations: ['lich_hen', 'lich_hen.ho_so', 'lich_hen.khoa', 'nguoi_tao', 'chi_tiet'],
+      relations: PaymentService.REL_HOA_DON,
       order: { id: 'DESC' },
     });
     return list.map((t) => this.goiTien(t));
@@ -176,14 +296,152 @@ export class PaymentService {
       .leftJoinAndSelect('t.lich_hen', 'lh')
       .leftJoinAndSelect('lh.ho_so', 'hs')
       .leftJoinAndSelect('lh.khoa', 'k')
+      .leftJoinAndSelect('lh.khung_gio', 'kg')
+      .leftJoinAndSelect('kg.bac_si', 'bskg')
+      .leftJoinAndSelect('lh.luot_kham', 'lk')
+      .leftJoinAndSelect('lk.bac_si', 'bslk')
       .leftJoinAndSelect('t.nguoi_tao', 'nt')
       .leftJoinAndSelect('t.chi_tiet', 'ct')
       .where('t.trang_thai = :tt', { tt: TrangThaiThanhToan.DA_THANH_TOAN })
       .andWhere('t.ngay_thanh_toan::date = :day', { day })
       .orderBy('t.ngay_thanh_toan', 'DESC')
       .getMany();
-    const tong = list.reduce((s, t) => s + t.tong_tien, 0);
-    return { ngay: day, so_hoa_don: list.length, tong_tien: tong, danh_sach: list.map((t) => this.goiTien(t)) };
+    // Gộp hai nguồn rồi xếp theo thời điểm thu để sổ thu đọc như một dòng tiền
+    const dong = [
+      ...list.map((t) => this.goiTien(t)),
+      ...(await this.lanThuTrongNgay(day)),
+    ].sort((a, b) => new Date(b.ngay_thanh_toan as any).getTime() - new Date(a.ngay_thanh_toan as any).getTime());
+    const tongHoaDon = list.reduce((s, t) => s + t.tong_tien, 0);
+    const tong = dong.reduce((s, t) => s + t.tong_tien, 0);
+    return {
+      ngay: day, so_hoa_don: dong.length, tong_tien: tong,
+      // Tách nguồn để lễ tân đối chiếu: bao nhiêu từ hóa đơn dịch vụ, bao nhiêu
+      // từ phiếu y lệnh
+      theo_nguon: {
+        hoa_don: { so_phieu: list.length, tong_tien: tongHoaDon },
+        y_lenh: { so_phieu: dong.length - list.length, tong_tien: tong - tongHoaDon },
+      },
+      danh_sach: dong,
+    };
+  }
+
+  // Doanh thu trong ngày GOM THEO TỪNG BỆNH NHÂN: mỗi bệnh nhân một dòng với
+  // tổng tiền, số hóa đơn, các dịch vụ đã dùng (gộp trùng) và chi tiết hóa đơn.
+  async doanhThuTheoBenhNhan(ngay?: string) {
+    const { ngay: day, danh_sach } = await this.thanhToanTrongNgay(ngay);
+    const nhom = new Map<string, any>();
+    for (const t of danh_sach) {
+      const lh = t.lich_hen;
+      // Khóa gom: ưu tiên id hồ sơ; thiếu hồ sơ thì gom riêng theo hóa đơn để
+      // không trộn nhầm nhiều bệnh nhân vào một dòng "không rõ".
+      const khoa = lh && lh.ho_so_id ? `hs:${lh.ho_so_id}` : `hd:${t.id}`;
+      if (!nhom.has(khoa)) {
+        nhom.set(khoa, {
+          ho_so_id: lh ? lh.ho_so_id : null,
+          ma_benh_nhan: lh ? lh.ma_benh_nhan : null,
+          ho_ten: (lh && lh.benh_nhan) || 'Không rõ bệnh nhân',
+          so_hoa_don: 0, tong_tien: 0,
+          dich_vu: [] as { ten_dich_vu: string; so_luong: number; thanh_tien: number }[],
+          hoa_don: [] as any[],
+        });
+      }
+      const b = nhom.get(khoa);
+      b.so_hoa_don += 1;
+      b.tong_tien += t.tong_tien;
+      b.hoa_don.push({
+        id: t.id, ma_thanh_toan: t.ma_thanh_toan, tong_tien: t.tong_tien,
+        ngay_thanh_toan: t.ngay_thanh_toan, ghi_chu: t.ghi_chu,
+        ma_lich_hen: lh ? lh.ma_lich_hen : null,
+        khoa: lh ? lh.khoa : null,
+        bac_si: lh && lh.bac_si ? lh.bac_si.ho_ten : null,
+        nguoi_thu: t.nguoi_tao ? t.nguoi_tao.ho_ten : null,
+        chi_tiet: t.chi_tiet,
+      });
+      for (const c of t.chi_tiet) {
+        const cu = b.dich_vu.find((d) => d.ten_dich_vu === c.ten_dich_vu);
+        if (cu) { cu.so_luong += c.so_luong; cu.thanh_tien += c.thanh_tien; }
+        else b.dich_vu.push({ ten_dich_vu: c.ten_dich_vu, so_luong: c.so_luong, thanh_tien: c.thanh_tien });
+      }
+    }
+    const benh_nhan = [...nhom.values()].sort((a, b) => b.tong_tien - a.tong_tien);
+    return {
+      ngay: day,
+      so_benh_nhan: benh_nhan.length,
+      so_hoa_don: benh_nhan.reduce((s, b) => s + b.so_hoa_don, 0),
+      tong_tien: benh_nhan.reduce((s, b) => s + b.tong_tien, 0),
+      benh_nhan,
+    };
+  }
+
+  // Toàn bộ tiền đã thu của MỘT bệnh nhân (mọi ngày) — xem lũy kế trong popup
+  async doanhThuMotBenhNhan(hoSoId: number) {
+    if (!Number.isInteger(hoSoId) || hoSoId <= 0) throw new BadRequestException('Hồ sơ bệnh nhân không hợp lệ');
+    const hs = await this.ds.getRepository(HoSoBenhNhan).findOne({ where: { id: hoSoId } });
+    if (!hs) throw new NotFoundException('Hồ sơ bệnh nhân không tồn tại');
+    const list = await this.tt.createQueryBuilder('t')
+      .leftJoinAndSelect('t.lich_hen', 'lh')
+      .leftJoinAndSelect('lh.ho_so', 'hsx')
+      .leftJoinAndSelect('lh.khoa', 'k')
+      .leftJoinAndSelect('lh.khung_gio', 'kg')
+      .leftJoinAndSelect('kg.bac_si', 'bskg')
+      .leftJoinAndSelect('lh.luot_kham', 'lk')
+      .leftJoinAndSelect('lk.bac_si', 'bslk')
+      .leftJoinAndSelect('t.nguoi_tao', 'nt')
+      .leftJoinAndSelect('t.chi_tiet', 'ct')
+      .where('hsx.id = :id', { id: hoSoId })
+      .andWhere('t.trang_thai = :tt', { tt: TrangThaiThanhToan.DA_THANH_TOAN })
+      .orderBy('t.ngay_thanh_toan', 'DESC')
+      .getMany();
+    const hoaDon = list.map((t) => this.goiTien(t));
+    return {
+      ho_so_id: hs.id, ma_benh_nhan: hs.ma_benh_nhan, ho_ten: hs.ho_ten,
+      so_hoa_don: hoaDon.length,
+      tong_tien: hoaDon.reduce((s, t) => s + t.tong_tien, 0),
+      lan_thu_dau: hoaDon.length ? hoaDon[hoaDon.length - 1].ngay_thanh_toan : null,
+      lan_thu_cuoi: hoaDon.length ? hoaDon[0].ngay_thanh_toan : null,
+      hoa_don: hoaDon,
+    };
+  }
+
+  // Doanh thu từng ngày trong MỘT THÁNG — nguồn để tô màu lịch chọn ngày.
+  // Chỉ tính hóa đơn đã thanh toán, gom theo ngày thu tiền.
+  async doanhThuTheoThang(thang?: string) {
+    const th = (thang ?? '').toString().trim();
+    if (th && !/^\d{4}-(0[1-9]|1[0-2])$/.test(th))
+      throw new BadRequestException('Tháng không hợp lệ (định dạng YYYY-MM)');
+    const month = th || this.chuanNgay().slice(0, 7);
+    const rows = await this.tt.createQueryBuilder('t')
+      .select("to_char(t.ngay_thanh_toan, 'YYYY-MM-DD')", 'ngay')
+      .addSelect('COUNT(*)', 'so_hoa_don')
+      .addSelect('SUM(t.tong_tien)', 'tong_tien')
+      .where('t.trang_thai = :tt', { tt: TrangThaiThanhToan.DA_THANH_TOAN })
+      .andWhere("to_char(t.ngay_thanh_toan, 'YYYY-MM') = :th", { th: month })
+      .groupBy("to_char(t.ngay_thanh_toan, 'YYYY-MM-DD')")
+      .getRawMany();
+    // Cộng thêm tiền thu từ phiếu y lệnh để lịch doanh thu và sổ thu trong ngày
+    // luôn khớp nhau — ngày chỉ thu y lệnh vẫn được tô màu trên lịch.
+    const rowsYl = await this.lanThu.createQueryBuilder('l')
+      .select("to_char(l.thoi_gian, 'YYYY-MM-DD')", 'ngay')
+      .addSelect('COUNT(*)', 'so_hoa_don')
+      .addSelect('SUM(l.so_tien)', 'tong_tien')
+      .where("to_char(l.thoi_gian, 'YYYY-MM') = :th", { th: month })
+      .groupBy("to_char(l.thoi_gian, 'YYYY-MM-DD')")
+      .getRawMany();
+    const gom = new Map<string, { ngay: string; so_hoa_don: number; tong_tien: number }>();
+    for (const r of [...rows, ...rowsYl]) {
+      const d = gom.get(r.ngay) || { ngay: r.ngay as string, so_hoa_don: 0, tong_tien: 0 };
+      d.so_hoa_don += Number(r.so_hoa_don);
+      d.tong_tien += Number(r.tong_tien);
+      gom.set(r.ngay, d);
+    }
+    const ngay = [...gom.values()].sort((a, b) => a.ngay.localeCompare(b.ngay));
+    return {
+      thang: month,
+      so_ngay_co_thu: ngay.length,
+      so_hoa_don: ngay.reduce((s, d) => s + d.so_hoa_don, 0),
+      tong_tien: ngay.reduce((s, d) => s + d.tong_tien, 0),
+      ngay,
+    };
   }
 
   // Trích xuất sổ thu trong ngày ra CSV (Excel mở được, UTF-8 BOM)
@@ -200,16 +458,18 @@ export class PaymentService {
     lines.push(row('Số hóa đơn đã thu', so_hoa_don));
     lines.push(row('Tổng thu (đồng)', tong_tien));
     lines.push('');
-    lines.push(row('STT', 'Mã hóa đơn', 'Bệnh nhân', 'Mã lịch hẹn', 'Khoa', 'Dịch vụ', 'Thành tiền', 'Giờ thu', 'Người thu'));
+    lines.push(row('STT', 'Nguồn', 'Mã phiếu', 'Bệnh nhân', 'Mã lịch hẹn', 'Khoa', 'BS khám', 'Nội dung', 'Thành tiền', 'Giờ thu', 'Người thu'));
     danh_sach.forEach((t, i) => {
       const dv = t.chi_tiet.map((c) => `${c.ten_dich_vu}${c.so_luong > 1 ? ` x${c.so_luong}` : ''}`).join('; ');
       const gio = t.ngay_thanh_toan ? new Date(t.ngay_thanh_toan).toLocaleTimeString('vi-VN') : '';
-      lines.push(row(i + 1, t.ma_thanh_toan, t.lich_hen ? t.lich_hen.benh_nhan : '',
+      const bs = t.lich_hen && t.lich_hen.bac_si ? t.lich_hen.bac_si.ho_ten : '';
+      const nguon = (t as any).nguon === 'y_lenh' ? 'Y lệnh' : 'Hóa đơn dịch vụ';
+      lines.push(row(i + 1, nguon, t.ma_thanh_toan, t.lich_hen ? t.lich_hen.benh_nhan : '',
         t.lich_hen ? t.lich_hen.ma_lich_hen : '', t.lich_hen ? t.lich_hen.khoa : '',
-        dv, t.tong_tien, gio, t.nguoi_tao ? t.nguoi_tao.ho_ten : ''));
+        bs, dv, t.tong_tien, gio, t.nguoi_tao ? t.nguoi_tao.ho_ten : ''));
     });
     lines.push('');
-    lines.push(row('', '', '', '', '', 'TỔNG CỘNG', tong_tien));
+    lines.push(row('', '', '', '', '', '', 'TỔNG CỘNG', tong_tien));
     return { day, buffer: Buffer.from('﻿' + lines.join('\r\n'), 'utf8') };
   }
 }
@@ -232,6 +492,19 @@ export class PaymentController {
   // Sổ thu trong ngày + trích xuất Excel
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
   @Get('reception/payments/daily') soThuNgay(@Query('ngay') ngay?: string) { return this.svc.thanhToanTrongNgay(ngay); }
+  // Doanh thu từng ngày trong tháng — để lịch tô màu ngày có thu
+  @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
+  @Get('reception/payments/monthly') soThuThang(@Query('thang') thang?: string) { return this.svc.doanhThuTheoThang(thang); }
+  // Doanh thu trong ngày gom theo từng bệnh nhân
+  @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
+  @Get('reception/payments/by-patient') soThuTheoBenhNhan(@Query('ngay') ngay?: string) {
+    return this.svc.doanhThuTheoBenhNhan(ngay);
+  }
+  // Tổng tiền đã thu của một bệnh nhân (mọi ngày)
+  @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
+  @Get('reception/payments/patient/:hoSoId') soThuMotBenhNhan(@Param('hoSoId') id: string) {
+    return this.svc.doanhThuMotBenhNhan(+id);
+  }
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.ADMIN)
   @Get('reception/payments/daily/export') async xuatSoThu(@Query('ngay') ngay?: string) {
     const { day, buffer } = await this.svc.xuatExcelNgay(ngay);

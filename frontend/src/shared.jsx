@@ -1,5 +1,5 @@
-import React, { useState, createContext, useContext } from "react";
-import { Heart, Menu, Search, Bell, LogOut, Shield, Stethoscope, User, Star } from "lucide-react";
+import React, { useState, useEffect, createContext, useContext } from "react";
+import { Menu, Search, Bell, LogOut, Shield, Stethoscope, User, Star } from "lucide-react";
 
 // ============================================================================
 //  SHARED — theme, lớp gọi API, điều hướng và UI primitive dùng chung
@@ -50,25 +50,16 @@ async function apiFetch(path, { method = "GET", body, auth = false } = {}) {
 
 const api = {
   // Auth
-  requestOtp: (sdt) => apiFetch("/auth/request-otp", { method: "POST", body: { sdt } }),
-  register: (b) => apiFetch("/auth/register", { method: "POST", body: b }),
   login: (tai_khoan, mat_khau) => apiFetch("/auth/login", { method: "POST", body: { tai_khoan, mat_khau } }),
-  // Catalog (công khai)
+  // Catalog (dùng trong các cổng nhân viên)
   departments: () => apiFetch("/departments"),
   doctors: (khoaId) => apiFetch("/doctors" + (khoaId ? `?khoa=${khoaId}` : "")),
-  slots: (bacSiId, ngay) => apiFetch(`/slots?bacSi=${bacSiId}&ngay=${ngay}`),
   news: () => apiFetch("/news"),
-  // Bệnh nhân — hồ sơ cá nhân & người thân (mọi thao tác đều được ghi nhật ký)
-  profileRecords: () => apiFetch("/profile/records", { auth: true }),
-  createProfileRecord: (b) => apiFetch("/profile/records", { method: "POST", body: b, auth: true }),
-  updateProfileRecord: (id, b) => apiFetch(`/profile/records/${id}`, { method: "PATCH", body: b, auth: true }),
-  deleteProfileRecord: (id) => apiFetch(`/profile/records/${id}`, { method: "DELETE", auth: true }),
-  myHistory: () => apiFetch("/profile/history", { auth: true }),
-  // Bệnh nhân
-  createAppt: (b) => apiFetch("/appointments", { method: "POST", body: b, auth: true }),
-  myAppts: () => apiFetch("/appointments/me", { auth: true }),
-  cancelAppt: (id) => apiFetch(`/appointments/${id}/cancel`, { method: "PATCH", auth: true }),
-  deleteAppt: (id) => apiFetch(`/appointments/${id}`, { method: "DELETE", auth: true }),
+  // Lễ tân / Quản trị viên — hồ sơ cá nhân của bệnh nhân được chọn (mọi thao tác ghi nhật ký)
+  receptionPatient: (id) => apiFetch(`/reception/ho-so/${id}`, { auth: true }),
+  createPatientRecord: (b) => apiFetch("/reception/ho-so", { method: "POST", body: b, auth: true }),
+  updatePatientRecord: (id, b) => apiFetch(`/reception/ho-so/${id}`, { method: "PATCH", body: b, auth: true }),
+  deletePatientRecord: (id) => apiFetch(`/reception/ho-so/${id}`, { method: "DELETE", auth: true }),
   // Mẫu bệnh án đính kèm lịch hẹn (tệp PDF/Word lưu nhị phân trong database)
   documents: (lichId) => apiFetch(`/appointments/${lichId}/documents`, { auth: true }),
   uploadDocument: async (lichId, file) => {
@@ -93,6 +84,8 @@ const api = {
   // Bác sĩ (trang Hàng chờ khám + Tổng quan)
   queue: () => apiFetch("/queue", { auth: true }),
   doctorSummary: () => apiFetch("/doctor/summary", { auth: true }),
+  // Lịch khám sắp tới của bác sĩ (gồm lịch lễ tân xác nhận từ đăng ký online)
+  doctorUpcoming: () => apiFetch("/doctor/upcoming", { auth: true }),
   saveResult: (lichId, b) => apiFetch(`/visits/${lichId}/result`, { method: "POST", body: b, auth: true }),
   // Lễ tân (trang Tiếp đón)
   receptionToday: (ngay) => apiFetch("/reception/today" + (ngay ? `?ngay=${ngay}` : ""), { auth: true }),
@@ -103,19 +96,46 @@ const api = {
   patientAppts: (hoSoId) => apiFetch(`/patients/${hoSoId}/appointments`, { auth: true }),
   // Lễ tân — tiếp nhận bệnh nhân mới đến trực tiếp (tạo hồ sơ walk-in)
   createReceptionPatient: (b) => apiFetch("/reception/patients", { method: "POST", body: b, auth: true }),
+  // Lễ tân tạo lịch khám mới cho bệnh nhân đến khám hôm nay (vào hàng chờ khám)
+  createNewExam: (b) => apiFetch("/reception/new-exam", { method: "POST", body: b, auth: true }),
+  // Doanh thu từng ngày trong một tháng (YYYY-MM) — để lịch tô màu ngày có thu
+  monthlyRevenue: (thang) => apiFetch("/reception/payments/monthly" + (thang ? `?thang=${thang}` : ""), { auth: true }),
+  // Doanh thu trong ngày gom theo bệnh nhân + tổng đã thu của một bệnh nhân
+  dailyByPatient: (ngay) => apiFetch("/reception/payments/by-patient" + (ngay ? `?ngay=${ngay}` : ""), { auth: true }),
+  patientRevenue: (hoSoId) => apiFetch(`/reception/payments/patient/${hoSoId}`, { auth: true }),
+  // Đăng ký khám online: bệnh nhân gửi ở trang công khai (không đăng nhập);
+  // lễ tân xem hàng chờ và tiếp nhận / hủy ở trang Tiếp đón.
+  dangKyKham: (b) => apiFetch("/public/dang-ky-kham", { method: "POST", body: b }),
+  dangKyKhamList: (trangThai) => apiFetch("/reception/dang-ky-kham" + (trangThai ? `?trang_thai=${trangThai}` : ""), { auth: true }),
+  updateDangKyKham: (id, b) => apiFetch(`/reception/dang-ky-kham/${id}`, { method: "PATCH", body: b, auth: true }),
+  // Ra viện: bác sĩ điều trị lập y lệnh ra viện; lễ tân kiểm tra điều kiện ĐKRV
+  createRaVien: (b) => apiFetch("/doctor/ra-vien", { method: "POST", body: b, auth: true }),
+  raVienList: (q) => apiFetch("/doctor/ra-vien" + (q ? `?q=${encodeURIComponent(q)}` : ""), { auth: true }),
+  cancelRaVien: (id) => apiFetch(`/doctor/ra-vien/${id}/huy`, { method: "PATCH", auth: true }),
+  dischargeEligibility: (hoSoId) => apiFetch(`/reception/discharge-eligibility/${hoSoId}`, { auth: true }),
   // Tái khám: lễ tân note ngày hẹn; thông tin phục vụ tái khám; danh sách của bác sĩ
   setRevisit: (hoSoId, b) => apiFetch(`/reception/patients/${hoSoId}/revisit`, { method: "PATCH", body: b, auth: true }),
   revisitInfo: (hoSoId) => apiFetch(`/patients/${hoSoId}/revisit-info`, { auth: true }),
+  // Hồ sơ tổng hợp: phiếu khám + lịch hẹn + y lệnh viện phí + thanh toán
+  patientSummary: (hoSoId) => apiFetch(`/patients/${hoSoId}/summary`, { auth: true }),
   doctorRevisits: () => apiFetch("/doctor/revisits", { auth: true }),
-  // Tải tài liệu bệnh án (endpoint cần JWT nên không dùng được <a href> trực tiếp)
-  downloadDocument: async (id, tenTep) => {
-    const res = await fetch(`${API_BASE}/documents/${id}/download`, { headers: { Authorization: "Bearer " + store.token } });
-    if (!res.ok) throw new Error("Không tải được tài liệu");
-    const url = URL.createObjectURL(await res.blob());
-    const a = document.createElement("a");
-    a.href = url; a.download = tenTep || "tai-lieu"; a.click();
-    URL.revokeObjectURL(url);
+  // Lễ tân: toàn bộ lịch tái khám (lọc ngày/bác sĩ/từ khóa); bác sĩ: xác nhận đã tái khám
+  revisits: ({ tu, den, bac_si, q } = {}) => {
+    const p = new URLSearchParams();
+    if (tu) p.set("tu", tu);
+    if (den) p.set("den", den);
+    if (bac_si) p.set("bac_si", bac_si);
+    if (q) p.set("q", q);
+    const s = p.toString();
+    return apiFetch("/reception/revisits" + (s ? `?${s}` : ""), { auth: true });
   },
+  doneRevisit: (hoSoId, b) => apiFetch(`/doctor/revisits/${hoSoId}/done`, { method: "PATCH", body: b, auth: true }),
+  // Tạo lịch tái khám thật (vào "Tất cả lịch hẹn") + báo bác sĩ, quản trị viên
+  createRevisitAppointment: (b) => apiFetch("/reception/revisit-appointments", { method: "POST", body: b, auth: true }),
+  // Thông báo của tài khoản đang đăng nhập
+  notifications: () => apiFetch("/notifications", { auth: true }),
+  readNotification: (id) => apiFetch(`/notifications/${id}/read`, { method: "PATCH", auth: true }),
+  readAllNotifications: () => apiFetch("/notifications/read-all", { method: "PATCH", auth: true }),
   records: (hoSoId) => apiFetch(`/records/${hoSoId}`, { auth: true }),
   // Admin
   reports: () => apiFetch("/admin/reports", { auth: true }),
@@ -124,8 +144,18 @@ const api = {
   createUser: (b) => apiFetch("/admin/users", { method: "POST", body: b, auth: true }),
   toggleUser: (id) => apiFetch(`/admin/users/${id}/status`, { method: "PATCH", auth: true }),
   resetPassword: (id, mat_khau) => apiFetch(`/admin/users/${id}/password`, { method: "PATCH", body: { mat_khau }, auth: true }),
-  // Lễ tân — tất cả lịch hẹn + xác nhận
-  allAppointments: (trangThai, q) => apiFetch("/reception/appointments" + (trangThai || q ? `?${trangThai ? `trang_thai=${trangThai}` : ""}${trangThai && q ? "&" : ""}${q ? `q=${encodeURIComponent(q)}` : ""}` : ""), { auth: true }),
+  // Người đang đăng nhập tự đổi mật khẩu của chính mình (nhập đúng mật khẩu hiện tại)
+  changeMyPassword: (mat_khau_cu, mat_khau_moi) => apiFetch("/auth/doi-mat-khau", { method: "PATCH", body: { mat_khau_cu, mat_khau_moi }, auth: true }),
+  // Lễ tân — tất cả lịch hẹn + xác nhận. loc: { tu, den } lọc theo ngày khám (YYYY-MM-DD)
+  allAppointments: (trangThai, q, loc) => {
+    const p = new URLSearchParams();
+    if (trangThai) p.set("trang_thai", trangThai);
+    if (q) p.set("q", q);
+    if (loc && loc.tu) p.set("tu", loc.tu);
+    if (loc && loc.den) p.set("den", loc.den);
+    const s = p.toString();
+    return apiFetch("/reception/appointments" + (s ? `?${s}` : ""), { auth: true });
+  },
   confirmAppt: (id) => apiFetch(`/reception/confirm/${id}`, { method: "POST", auth: true }),
   // Lễ tân — phiếu thông tin khám bệnh (mẫu bệnh án của bệnh viện)
   lookupPatientInfo: (ma) => apiFetch(`/reception/patient-lookup?ma=${encodeURIComponent(ma)}`, { auth: true }),
@@ -141,10 +171,107 @@ const api = {
     return apiFetch("/reception/y-lenh" + (qs ? `?${qs}` : ""), { auth: true });
   },
   yLenh: (id) => apiFetch(`/reception/y-lenh/${id}`, { auth: true }),
+  // Chỉ định cận lâm sàng của phiếu khám → dòng dịch vụ cho chi tiết viện phí
+  yLenhCls: (phieuKhamId) => apiFetch(`/reception/y-lenh/cls/${phieuKhamId}`, { auth: true }),
+  // Đơn thuốc bác sĩ đã kê ở lần khám → dòng thuốc cho chi tiết viện phí
+  yLenhDonThuoc: (phieuKhamId) => apiFetch(`/reception/y-lenh/don-thuoc/${phieuKhamId}`, { auth: true }),
+  // Danh mục vật tư tiêu hao trong database (lọc theo khoa/nhóm/từ khóa)
+  vatTuCatalog: (p = {}) => {
+    const q = new URLSearchParams();
+    if (p.khoa) q.set("khoa", p.khoa);
+    if (p.nhom) q.set("nhom", p.nhom);
+    if (p.q) q.set("q", p.q);
+    const s = q.toString();
+    return apiFetch("/catalog/vat-tu" + (s ? `?${s}` : ""), { auth: true });
+  },
+  // Danh mục thuốc trong database — nguồn cho ô kê đơn và ô chọn thuốc viện phí
+  thuocCatalog: (q) => apiFetch("/catalog/thuoc" + (q ? `?q=${encodeURIComponent(q)}` : ""), { auth: true }),
   payYLenh: (id, so_tien) => apiFetch(`/reception/y-lenh/${id}/thu`, { method: "POST", body: { so_tien }, auth: true }),
+  // Kho — tủ thuốc & tủ vật tư tiêu hao
+  khoTon: (p = {}) => {
+    const q = new URLSearchParams();
+    if (p.loai) q.set("loai", p.loai);
+    if (p.q) q.set("q", p.q);
+    if (p.sap_het) q.set("sap_het", "1");
+    const s = q.toString();
+    return apiFetch("/kho/ton" + (s ? `?${s}` : ""), { auth: true });
+  },
+  khoNhap: (b) => apiFetch("/kho/nhap", { method: "POST", body: b, auth: true }),
+  khoSuaGia: (b) => apiFetch("/kho/gia", { method: "POST", body: b, auth: true }),
+  khoDieuChinh: (b) => apiFetch("/kho/dieu-chinh", { method: "POST", body: b, auth: true }),
+  khoNhatKy: (p = {}) => {
+    const q = new URLSearchParams();
+    if (p.loai) q.set("loai", p.loai);
+    if (p.ma) q.set("ma", p.ma);
+    if (p.loai_gd) q.set("loai_gd", p.loai_gd);
+    const s = q.toString();
+    return apiFetch("/kho/nhat-ky" + (s ? `?${s}` : ""), { auth: true });
+  },
+  // Nhập viện một chạm — yêu cầu của bác sĩ, hàng chờ lễ tân, đợt nội trú, giường
+  nvHangCho: (p = {}) => {
+    const q = new URLSearchParams();
+    if (p.trang_thai) q.set("trang_thai", p.trang_thai);
+    if (p.q) q.set("q", p.q);
+    const s = q.toString();
+    return apiFetch("/nhap-vien/hang-cho" + (s ? `?${s}` : ""), { auth: true });
+  },
+  nvChiTiet: (id) => apiFetch(`/nhap-vien/${id}`, { auth: true }),
+  nvTiepNhan: (id) => apiFetch(`/nhap-vien/${id}/tiep-nhan`, { method: "POST", auth: true }),
+  nvXacMinh: (id, b) => apiFetch(`/nhap-vien/${id}/xac-minh`, { method: "PATCH", body: b, auth: true }),
+  nvXacNhan: (id, b) => apiFetch(`/nhap-vien/${id}/xac-nhan`, { method: "POST", body: b, auth: true }),
+  nvKetThuc: (id, b) => apiFetch(`/nhap-vien/${id}/ket-thuc`, { method: "POST", body: b, auth: true }),
+  // Quản lý duyệt nhập viện — bắt buộc trước khi khoa xác nhận tiếp nhận
+  nvDuyet: (id, b) => apiFetch(`/nhap-vien/${id}/duyet`, { method: "POST", body: b || {}, auth: true }),
+  noiTru: (p = {}) => {
+    const q = new URLSearchParams();
+    if (p.trang_thai) q.set("trang_thai", p.trang_thai);
+    if (p.q) q.set("q", p.q);
+    const s = q.toString();
+    return apiFetch("/noi-tru" + (s ? `?${s}` : ""), { auth: true });
+  },
+  noiTruKhoaNhan: (id) => apiFetch(`/noi-tru/${id}/khoa-nhan`, { method: "POST", auth: true }),
+  giuongList: (p = {}) => {
+    const q = new URLSearchParams();
+    if (p.khoa_id) q.set("khoa_id", String(p.khoa_id));
+    if (p.trong) q.set("trong", "1");
+    const s = q.toString();
+    return apiFetch("/giuong" + (s ? `?${s}` : ""), { auth: true });
+  },
+  giuongLuu: (b) => apiFetch("/admin/giuong", { method: "POST", body: b, auth: true }),
   // Bác sĩ — phiếu điều trị (diễn biến bệnh theo thời gian)
   addProgress: (b) => apiFetch("/treatment/progress", { method: "POST", body: b, auth: true }),
   progressList: (phieuKhamId) => apiFetch(`/treatment/progress/${phieuKhamId}`, { auth: true }),
+  progressByPatient: (hoSoId) => apiFetch(`/treatment/progress-by-patient/${hoSoId}`, { auth: true }),
+  // Chuyển khoa điều trị — lễ tân/bác sĩ đề nghị, bác sĩ khoa đến tiếp nhận
+  chuyenKhoaTao: (b) => apiFetch("/treatment/chuyen-khoa", { method: "POST", body: b, auth: true }),
+  chuyenKhoaList: (p = {}) => {
+    const s = new URLSearchParams();
+    if (p.phieu_kham_id) s.set("phieu_kham_id", p.phieu_kham_id);
+    if (p.trang_thai) s.set("trang_thai", p.trang_thai);
+    if (p.khoa_id) s.set("khoa_id", p.khoa_id);
+    return apiFetch("/treatment/chuyen-khoa" + (s.toString() ? `?${s}` : ""), { auth: true });
+  },
+  chuyenKhoaTiepNhan: (id) => apiFetch(`/treatment/chuyen-khoa/${id}/tiep-nhan`, { method: "POST", auth: true }),
+  chuyenKhoaKetThuc: (id, b) => apiFetch(`/treatment/chuyen-khoa/${id}/ket-thuc`, { method: "POST", body: b, auth: true }),
+  // Điều phối bệnh nhân: lễ tân tiếp đón → quản lý phân khoa + chỉ định bác sĩ →
+  // lễ tân xác nhận đã đưa tới phòng
+  dieuPhoiList: (p = {}) => {
+    const s = new URLSearchParams();
+    if (p.trang_thai) s.set("trang_thai", p.trang_thai);
+    if (p.ngay) s.set("ngay", p.ngay);
+    if (p.q) s.set("q", p.q);
+    return apiFetch("/dieu-phoi" + (s.toString() ? `?${s}` : ""), { auth: true });
+  },
+  dieuPhoiChiTiet: (id) => apiFetch(`/dieu-phoi/${id}`, { auth: true }),
+  dieuPhoiBacSi: (khoaId) => apiFetch(`/dieu-phoi/bac-si?khoa_id=${encodeURIComponent(khoaId)}`, { auth: true }),
+  dieuPhoiChiDinh: (id, b) => apiFetch(`/dieu-phoi/${id}/chi-dinh`, { method: "POST", body: b, auth: true }),
+  dieuPhoiTuChoi: (id, b) => apiFetch(`/dieu-phoi/${id}/tu-choi`, { method: "POST", body: b, auth: true }),
+  dieuPhoiChuyenPhong: (id, b) => apiFetch(`/dieu-phoi/${id}/chuyen-phong`, { method: "POST", body: b, auth: true }),
+  // Cổng quản lý — giám sát hoạt động khám và doanh thu theo khoa (ngày/tuần/tháng)
+  quanLyThuoc: (ky, moc) =>
+    apiFetch(`/quan-ly/thuoc?ky=${encodeURIComponent(ky)}${moc ? `&moc=${encodeURIComponent(moc)}` : ""}`, { auth: true }),
+  quanLyTongQuan: (ky, moc) =>
+    apiFetch(`/quan-ly/tong-quan?ky=${encodeURIComponent(ky)}${moc ? `&moc=${encodeURIComponent(moc)}` : ""}`, { auth: true }),
   // Truyền thông — bài viết + ảnh lưu database, nhóm theo ngày
   mediaPosts: (ngay) => apiFetch("/media/posts" + (ngay ? `?ngay=${ngay}` : "")),
   mediaPost: (id) => apiFetch(`/media/posts/${id}`),
@@ -171,6 +298,13 @@ const api = {
   saveExam: (id, b) => apiFetch(`/encounters/${id}/exam`, { method: "POST", body: b, auth: true }),
   addOrder: (id, b) => apiFetch(`/encounters/${id}/orders`, { method: "POST", body: b, auth: true }),
   orderResult: (orderId, b) => apiFetch(`/encounters/orders/${orderId}/result`, { method: "PATCH", body: b, auth: true }),
+  deleteOrder: (orderId) => apiFetch(`/encounters/orders/${orderId}`, { method: "DELETE", auth: true }),
+  // Hỗ trợ sinh sản (IVF) — hồ sơ điều trị hiếm muộn theo từng bệnh nhân
+  ivfList: () => apiFetch("/ivf/ho-so", { auth: true }),
+  ivfStart: (b) => apiFetch("/ivf/ho-so", { method: "POST", body: b, auth: true }),
+  ivfToggleStep: (id, b) => apiFetch(`/ivf/ho-so/${id}/buoc`, { method: "PATCH", body: b, auth: true }),
+  ivfSetPhase: (id, b) => apiFetch(`/ivf/ho-so/${id}/giai-doan`, { method: "PATCH", body: b, auth: true }),
+  ivfNote: (id, b) => apiFetch(`/ivf/ho-so/${id}`, { method: "PATCH", body: b, auth: true }),
   saveConclusion: (id, b) => apiFetch(`/encounters/${id}/conclusion`, { method: "POST", body: b, auth: true }),
   // Dịch vụ & thanh toán
   services: () => apiFetch("/services", { auth: true }),
@@ -191,8 +325,26 @@ const api = {
   // Admin — khung giờ khám (trả đủ mọi khung, kể cả đã đầy)
   adminSlots: (bacSi, ngay) => apiFetch(`/admin/slots?bacSi=${bacSi}&ngay=${ngay}`, { auth: true }),
   addSlot: (b) => apiFetch("/admin/slots", { method: "POST", body: b, auth: true }),
+  // Tạo khung giờ hàng loạt cho nhiều bác sĩ trong nhiều ngày
+  addSlotsBulk: (b) => apiFetch("/admin/slots/bulk", { method: "POST", body: b, auth: true }),
   updateSlot: (id, b) => apiFetch(`/admin/slots/${id}`, { method: "PATCH", body: b, auth: true }),
   deleteSlot: (id) => apiFetch(`/admin/slots/${id}`, { method: "DELETE", auth: true }),
+  // Trợ lý ảo: gửi câu hỏi + lịch sử phiên hiện tại (không lưu ở client lẫn server)
+  chat: (noi_dung, lich_su) => apiFetch("/chat", { method: "POST", body: { noi_dung, lich_su }, auth: true }),
+  reportTypes: () => apiFetch("/admin/report-types", { auth: true }),
+  report: (loai, tu, den) => apiFetch(`/admin/report/${loai}?tu=${tu}&den=${den}`, { auth: true }),
+  exportReportByType: async (loai, tu, den) => {
+    const res = await fetch(`${API_BASE}/admin/report/${loai}/export?tu=${tu}&den=${den}`, {
+      headers: { Authorization: "Bearer " + store.token },
+    });
+    if (!res.ok) throw new Error("Không xuất được báo cáo");
+    return res.blob();
+  },
+  createDepartment: (b) => apiFetch("/admin/departments", { method: "POST", body: b, auth: true }),
+  updateDepartment: (id, b) => apiFetch(`/admin/departments/${id}`, { method: "PATCH", body: b, auth: true }),
+  deleteDepartment: (id) => apiFetch(`/admin/departments/${id}`, { method: "DELETE", auth: true }),
+  createDoctor: (b) => apiFetch("/admin/doctors", { method: "POST", body: b, auth: true }),
+  updateDoctor: (id, b) => apiFetch(`/admin/doctors/${id}`, { method: "PATCH", body: b, auth: true }),
   // Admin — xuất báo cáo CSV (mở bằng Excel)
   exportReport: async () => {
     const res = await fetch(`${API_BASE}/admin/reports/export`, {
@@ -303,10 +455,12 @@ function PortalShell({ role, tone, soft, name, sub, items, tab, setTab, bell, ch
       {/* Sidebar */}
       <aside className={"sidebar" + (open ? " sidebarOpen" : "")} style={{ width: 256, background: T.surface, borderRight: `1px solid ${T.line}`, padding: "22px 16px", display: "flex", flexDirection: "column", position: "sticky", top: 0, height: "100vh" }}>
         <button onClick={() => go("home")} style={{ display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", cursor: "pointer", marginBottom: 28, padding: "0 6px" }}>
-          <span style={{ width: 38, height: 38, borderRadius: 13, background: `linear-gradient(135deg, ${T.peach}, ${T.lav})`, display: "grid", placeItems: "center" }}><Heart size={18} fill="#fff" color="#fff" /></span>
+          <img src="/Logo_PSHP.jpg" alt="" width={38} height={38} style={{ borderRadius: "50%", objectFit: "contain", flexShrink: 0 }} />
           <span style={{ textAlign: "left", lineHeight: 1.15 }}><b style={{ color: T.ink, fontSize: 14.5 }}>Phụ sản HP</b><br /><small style={{ color: tone, fontSize: 10.5, fontWeight: 700, letterSpacing: 1 }}>{sub.toUpperCase()}</small></span>
         </button>
-        <nav style={{ display: "grid", gap: 4, flex: 1 }}>
+        {/* alignContent: start — nút giữ chiều cao tự nhiên, không bị kéo giãn lấp
+            đầy sidebar khi cổng có ít mục (cổng Quản lý chỉ có một mục). */}
+        <nav style={{ display: "grid", gap: 4, flex: 1, alignContent: "start" }}>
           {items.map((it) => {
             const on = tab === it.id;
             return (
@@ -368,8 +522,49 @@ const NEWS = [
   { id: 4, tag: "Hiếm muộn", title: "Hành trình IVF: những điều nên chuẩn bị", date: "15/06/2026", read: 8, tone: T.lav },
 ];
 
+// ============================================================================
+//  THÔNG BÁO — hook + panel dùng chung cho chuông ở mọi cổng (bác sĩ, admin...).
+//  Nguồn: GET /notifications (chỉ thông báo của tài khoản đang đăng nhập).
+// ============================================================================
+function useThongBao(live) {
+  const [list, setList] = useState([]);
+  const load = () => {
+    if (!live) return;
+    api.notifications().then((r) => setList(Array.isArray(r) ? r : [])).catch(() => {});
+  };
+  useEffect(load, [live]);
+  const chuaDoc = list.filter((t) => !t.da_doc).length;
+  const docTatCa = () => api.readAllNotifications().then(load).catch(() => {});
+  return { list, chuaDoc, load, docTatCa };
+}
+
+function ThongBaoPanel({ list, docTatCa, onMo }) {
+  const fmt = (t) => { const d = new Date(t); return isNaN(d) ? "" : d.toLocaleString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }); };
+  return (
+    <div>
+      <div style={{ padding: "13px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span style={{ fontWeight: 800, color: T.ink, fontSize: 14 }}>Thông báo ({list.length})</span>
+        {list.some((t) => !t.da_doc) && <Btn kind="ghost" size="sm" onClick={docTatCa}>Đánh dấu đã đọc</Btn>}
+      </div>
+      {list.length === 0 ? (
+        <div style={{ padding: "8px 16px 20px", textAlign: "center", color: T.sub, fontSize: 13.5 }}>Chưa có thông báo nào.</div>
+      ) : list.map((t) => (
+        <div key={t.id} onClick={onMo ? () => onMo(t) : undefined}
+          style={{ padding: "11px 16px", borderTop: `1px solid ${T.line}`, background: t.da_doc ? "transparent" : T.goldSoft, cursor: onMo ? "pointer" : "default" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+            <span style={{ fontWeight: 700, color: T.ink, fontSize: 13.5 }}>{t.tieu_de}</span>
+            <span style={{ fontSize: 11.5, color: T.sub, whiteSpace: "nowrap" }}>{fmt(t.thoi_gian)}</span>
+          </div>
+          {t.noi_dung && <div style={{ fontSize: 12.5, color: T.sub, marginTop: 3 }}>{t.noi_dung}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export {
   T, store, api, Nav, useNav,
   Btn, Card, Pill, Avatar, Stars, SectionHead, StatCard, PageTitle,
   FormField, input, pickRow, PortalShell, NEWS,
+  useThongBao, ThongBaoPanel,
 };

@@ -1,24 +1,26 @@
-import * as dotenv from 'dotenv';
-dotenv.config(); // nạp biến từ file .env
+import './env'; // nạp biến từ file .env (một nơi duy nhất)
 
 import {
   NguoiDung, KhoaPhong, BacSi, DichVu, HoSoBenhNhan, KhungGio, LichHen, LuotKham, DonThuoc, TinTuc,
   NhatKyHoatDong, TaiLieuBenhAn, ThanhToan, ChiTietThanhToan, PhieuKhamBenh,
-  PhieuYLenh, ChiTietYLenh, DienBienDieuTri, LanThuTienYLenh,
-  SinhHieu, KhamLamSang, ChiDinhCLS, KetLuanKham, BaiTruyenThong, AnhTruyenThong,
+  PhieuYLenh, ChiTietYLenh, DienBienDieuTri, LanThuTienYLenh, ChuyenKhoa,
+  SinhHieu, KhamLamSang, ChiDinhCLS, KetLuanKham, BaiTruyenThong, AnhTruyenThong, ThongBao, HoSoIVF,
+  DangKyKham, PhieuRaVien, VatTuTieuHao, Thuoc, TonKho, NhatKyKho,
+  Giuong, YeuCauNhapVien, DotNoiTru, DieuPhoiBenhNhan,
 } from './entities';
 
 export const ENTITIES = [
   NguoiDung, KhoaPhong, BacSi, DichVu, HoSoBenhNhan, KhungGio, LichHen, LuotKham, DonThuoc, TinTuc,
   NhatKyHoatDong, TaiLieuBenhAn, ThanhToan, ChiTietThanhToan, PhieuKhamBenh,
-  PhieuYLenh, ChiTietYLenh, DienBienDieuTri, LanThuTienYLenh,
-  SinhHieu, KhamLamSang, ChiDinhCLS, KetLuanKham, BaiTruyenThong, AnhTruyenThong,
+  PhieuYLenh, ChiTietYLenh, DienBienDieuTri, LanThuTienYLenh, ChuyenKhoa,
+  SinhHieu, KhamLamSang, ChiDinhCLS, KetLuanKham, BaiTruyenThong, AnhTruyenThong, ThongBao, HoSoIVF,
+  DangKyKham, PhieuRaVien, VatTuTieuHao, Thuoc, TonKho, NhatKyKho,
+  Giuong, YeuCauNhapVien, DotNoiTru, DieuPhoiBenhNhan,
 ];
 
 // Cấu hình kết nối PostgreSQL, đọc từ biến môi trường (.env).
 // Mặc định phù hợp với cài đặt PostgreSQL cục bộ thông thường.
 const url = process.env.DATABASE_URL;
-const isProd = process.env.NODE_ENV === 'production';
 
 export const dbConfig = {
   type: 'postgres' as const,
@@ -32,7 +34,9 @@ export const dbConfig = {
         database: process.env.DB_NAME || 'bv_phusan',
       }),
   entities: ENTITIES,
-  // Lần đầu deploy đặt DB_SYNC=true để tạo bảng, sau đó nên đặt false.
-  synchronize: process.env.DB_SYNC ? process.env.DB_SYNC === 'true' : !isProd,
+  // synchronize MẶC ĐỊNH TẮT: schema chỉ thay đổi qua migration (npm run migration:*)
+  // để có lịch sử, hoàn tác được và không bao giờ tự sửa bảng trên dữ liệu thật.
+  // Chỉ bật (DB_SYNC=true) cho database kiểm thử hoặc khi dựng lại DB trống.
+  synchronize: process.env.DB_SYNC === 'true',
   logging: process.env.DB_LOGGING === 'true',
 };

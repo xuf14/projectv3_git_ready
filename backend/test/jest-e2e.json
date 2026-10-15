@@ -3,5 +3,8 @@
   "rootDir": ".",
   "testRegex": ".e2e-spec.ts$",
   "transform": { "^.+\\.(t|j)s$": "ts-jest" },
-  "testTimeout": 30000
+  "setupFiles": ["<rootDir>/setup-env.ts"],
+  "globalSetup": "<rootDir>/global-setup.ts",
+  "testTimeout": 60000,
+  "maxWorkers": 1
 }

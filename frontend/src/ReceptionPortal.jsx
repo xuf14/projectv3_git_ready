@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import {
   LayoutDashboard, UserCheck, Users, FileText, CheckCircle2, Clock, CalendarCheck,
-  ChevronRight, User, Search, X, ClipboardList, Wallet, Banknote, Stethoscope, Receipt, ListChecks,
+  ChevronRight, User, Search, X, ClipboardList, Banknote, Stethoscope, Receipt, ListChecks,
+  CalendarClock, ExternalLink, Boxes, BedDouble, Activity, DoorOpen,
 } from "lucide-react";
 import {
   T, store, api, useNav, Btn, Card, Pill, SectionHead, StatCard, PageTitle, PortalShell,
@@ -12,8 +13,14 @@ import { AllAppointments, PaymentList } from "./Billing";
 import DailyPayments from "./DailyPayments";
 import ThongTinBenhNhan from "./thongtinbenhnhan";
 import TiepNhanBenhNhan from "./tiepnhan";
+import DangKyOnline from "./dangky_online";
+import TaiKham from "./taikham";
 import YLenh from "./y_lenh";
+import TonKhoPage from "./TonKho";
+import NhapVienPage from "./nhapvien";
 import QuyTrinhKham from "./quytrinhkham";
+import PhieuDieuTri from "./phieu_dieu_tri";
+import { DieuPhoiLeTan } from "./dieuphoi";
 
 // ============================================================================
 //  CỔNG LỄ TÂN — tách riêng khỏi cổng bác sĩ.
@@ -28,10 +35,32 @@ import QuyTrinhKham from "./quytrinhkham";
 // Lịch hẹn trong ngày → dòng trong màn hình tiếp đón
 function mapReceptionItem(a) {
   const st = { da_checkin: "checked", da_huy: "cancelled", da_kham: "done" };
+  const bs = (a.khung_gio && a.khung_gio.bac_si) || null;
   return { dbId: a.id, code: a.ma_lich_hen, name: (a.ho_so && a.ho_so.ho_ten) || "—",
     time: (a.khung_gio && a.khung_gio.gio_bat_dau) || "", dept: (a.khoa && a.khoa.ten_khoa) || "",
-    status: st[a.trang_thai] || "pending", queue: a.so_thu_tu };
+    status: st[a.trang_thai] || "pending", queue: a.so_thu_tu,
+    hoSoId: (a.ho_so && a.ho_so.id) || null,
+    bacSi: (bs && bs.ho_ten) || "" };  // ho_ten đã kèm học hàm (VD "BS.CKII Lê Hữu Phúc")
 }
+
+// Liên kết mở cổng Bác sĩ ở TAB TRÌNH DUYỆT MỚI, vào thẳng "Hàng chờ khám" với đúng
+// bệnh nhân đang tiếp đón. Bác sĩ VẪN phải đăng nhập ở tab đó — liên kết không bỏ
+// qua xác thực. URL chỉ mang id hồ sơ (số), không kèm tên hay dữ liệu cá nhân.
+function urlCongBacSi(hoSoId) {
+  if (!hoSoId) return null;
+  const u = new URL(window.location.href);
+  u.search = `?cong=bac-si&tab=queue&hs=${encodeURIComponent(hoSoId)}`;
+  u.hash = "";
+  return u.toString();
+}
+
+// Thẻ liên kết nổi bật trong dòng lịch hẹn (dùng <a> để tab mới không bị chặn popup)
+const lienKetBacSi = {
+  display: "inline-flex", alignItems: "center", gap: 6, marginTop: 8,
+  padding: "6px 12px", borderRadius: 999, border: `1.5px solid ${T.sky}`,
+  background: T.skySoft, color: T.sky, fontSize: 12.5, fontWeight: 800,
+  textDecoration: "none", fontFamily: "inherit", cursor: "pointer",
+};
 
 // ---------- MOCK DATA (dự phòng khi backend chưa chạy) ----------
 const RECEPTION_TODAY = [
@@ -42,29 +71,42 @@ const RECEPTION_TODAY = [
 
 function ReceptionPortal() {
   const [tab, setTab] = useState("dash");
+  // Tham số kèm theo khi một màn hình chuyển sang tab khác (vd: từ điều kiện ĐKRV
+  // sang "Y lệnh viện phí" đã lọc sẵn theo bệnh nhân cần thu nốt viện phí).
+  const [thamSo, setThamSo] = useState(null);
+  const dieuHuong = (tabMoi, ts = null) => { setThamSo(ts); setTab(tabMoi); window.scrollTo(0, 0); };
   const items = [
     { id: "dash", label: "Tổng quan", icon: LayoutDashboard },
     { id: "reception", label: "Tiếp đón", icon: UserCheck },
+    { id: "dieuphoi", label: "Chuyển phòng khám", icon: DoorOpen },
     { id: "flow", label: "Quy trình khám", icon: ListChecks },
     { id: "examsheet", label: "Thông tin khám bệnh", icon: Stethoscope },
     { id: "ylenh", label: "Y lệnh viện phí", icon: Receipt },
+    { id: "treatment", label: "Phiếu điều trị", icon: Activity },
+    { id: "nhapvien", label: "Nhập viện", icon: BedDouble },
+    { id: "kho", label: "Tồn kho", icon: Boxes },
     { id: "appointments", label: "Tất cả lịch hẹn", icon: ClipboardList },
-    { id: "payments", label: "Thanh toán", icon: Wallet },
+    { id: "taikham", label: "Tái khám", icon: CalendarClock },
     { id: "daily", label: "Sổ thu trong ngày", icon: Banknote },
     { id: "patients", label: "Hồ sơ bệnh nhân", icon: Users },
     { id: "history", label: "Lịch sử khám", icon: FileText },
   ];
   const name = (store.user && store.user.ho_ten) || "Lễ tân";
   return (
-    <PortalShell role="reception" tone={T.gold} soft={T.goldSoft} name={name} sub="Lễ tân" items={items} tab={tab} setTab={setTab}>
+    <PortalShell role="reception" tone={T.gold} soft={T.goldSoft} name={name} sub="Lễ tân" items={items} tab={tab}
+      setTab={(t) => dieuHuong(t)}>
       {tab === "dash" && <ReceptionDash setTab={setTab} />}
       {tab === "reception" && <ReceptionArea />}
+      {tab === "dieuphoi" && <DieuPhoiLeTan />}
       {tab === "flow" && <QuyTrinhKham />}
-      {tab === "examsheet" && <ThongTinBenhNhan />}
-      {tab === "ylenh" && <YLenh />}
+      {tab === "examsheet" && <ThongTinBenhNhan onDieuHuong={dieuHuong} />}
+      {tab === "ylenh" && <YLenh tuKhoaBanDau={thamSo && thamSo.q} />}
+      {tab === "treatment" && <PhieuDieuTri />}
+      {tab === "nhapvien" && <NhapVienPage />}
+      {tab === "kho" && <TonKhoPage />}
       {tab === "appointments" && <AllAppointments />}
-      {tab === "payments" && <PaymentList mode="reception" />}
-      {tab === "daily" && <DailyPayments />}
+      {tab === "taikham" && <TaiKham />}
+      {tab === "daily" && <SoThuArea />}
       {tab === "patients" && <PatientList />}
       {tab === "history" && <ExamHistory />}
     </PortalShell>
@@ -76,11 +118,26 @@ function ReceptionArea() {
   const [sub, setSub] = useState("checkin");
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
         <Btn kind={sub === "checkin" ? "primary" : "ghost"} size="sm" onClick={() => setSub("checkin")}>Check-in hôm nay</Btn>
         <Btn kind={sub === "tiepnhan" ? "primary" : "ghost"} size="sm" onClick={() => setSub("tiepnhan")}>Tra cứu & tiếp nhận bệnh nhân</Btn>
+        <Btn kind={sub === "dangky" ? "primary" : "ghost"} size="sm" onClick={() => setSub("dangky")}>Đăng ký khám online</Btn>
       </div>
-      {sub === "checkin" ? <Reception /> : <TiepNhanBenhNhan />}
+      {sub === "checkin" ? <Reception /> : sub === "dangky" ? <DangKyOnline /> : <TiepNhanBenhNhan />}
+    </div>
+  );
+}
+
+// Sổ thu trong ngày gồm 2 phần: sổ thu theo ngày và toàn bộ hóa đơn để thu tiền
+function SoThuArea() {
+  const [sub, setSub] = useState("sothu");
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <Btn kind={sub === "sothu" ? "primary" : "ghost"} size="sm" onClick={() => setSub("sothu")}>Sổ thu theo ngày</Btn>
+        <Btn kind={sub === "hoadon" ? "primary" : "ghost"} size="sm" onClick={() => setSub("hoadon")}>Thanh toán / hóa đơn</Btn>
+      </div>
+      {sub === "sothu" ? <DailyPayments /> : <PaymentList mode="reception" />}
     </div>
   );
 }
@@ -152,7 +209,7 @@ function Reception() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
   const [ma, setMa] = useState("");
-  const [found, setFound] = useState(null);   // kết quả tra cứu theo mã
+  const [found, setFound] = useState(null);   // danh sách lịch hẹn tra cứu theo mã lịch hẹn / mã BN
   const [searchErr, setSearchErr] = useState(null);
   const [busyId, setBusyId] = useState(null);
 
@@ -174,8 +231,9 @@ function Reception() {
     if (!live) { setSearchErr("Chưa kết nối backend — tra cứu chỉ hoạt động với dữ liệu thật."); return; }
     try {
       const r = await api.lookupAppt(q);
-      if (r) setFound(mapReceptionItem(r));
-      else setSearchErr(`Không tìm thấy lịch hẹn với mã "${q}".`);
+      const arr = (Array.isArray(r) ? r : r ? [r] : []).map(mapReceptionItem);
+      if (arr.length) setFound(arr);
+      else setSearchErr(`Không tìm thấy lịch hẹn hoặc bệnh nhân với mã "${q}".`);
     } catch (e) { setSearchErr(e.message); }
   };
 
@@ -195,6 +253,16 @@ function Reception() {
       <div style={{ flex: 1, minWidth: 150 }}>
         <div style={{ fontWeight: 800, color: T.ink, fontSize: 15.5 }}>{r.name}</div>
         <div style={{ color: T.sub, fontSize: 13.5, marginTop: 4 }}>{r.code} · {r.dept} · {r.time}</div>
+        {r.hoSoId ? (
+          <a href={urlCongBacSi(r.hoSoId)} target="_blank" rel="noopener noreferrer" style={lienKetBacSi}
+            title="Mở cổng Bác sĩ ở tab mới — bác sĩ điều trị cần đăng nhập bằng tài khoản của mình">
+            <Stethoscope size={14} />
+            {r.bacSi || "Bác sĩ điều trị"} · Mở cổng bác sĩ
+            <ExternalLink size={13} />
+          </a>
+        ) : r.bacSi ? (
+          <div style={{ color: T.sub, fontSize: 12.5, marginTop: 6 }}>{r.bacSi}</div>
+        ) : null}
       </div>
       {r.status === "checked" && <Pill tone={T.mint} soft={T.mintSoft}><CheckCircle2 size={13} /> Đã check-in{r.queue ? ` · STT #${r.queue}` : ""}</Pill>}
       {r.status === "cancelled" && <Pill tone="#C0392B" soft="#FDECEA"><X size={13} /> Đã hủy</Pill>}
@@ -208,15 +276,20 @@ function Reception() {
     <div>
       <PageTitle title="Tiếp đón bệnh nhân" sub={live ? "Xác nhận lịch hẹn và check-in bệnh nhân đến khám." : "Dữ liệu demo — đăng nhập với backend để thao tác thật."} />
       <Card style={{ padding: 26, marginBottom: 22 }}>
-        <div style={{ fontWeight: 800, color: T.ink, fontSize: 16, marginBottom: 16 }}>Tra cứu lịch hẹn</div>
+        <div style={{ fontWeight: 800, color: T.ink, fontSize: 16, marginBottom: 16 }}>Tra cứu lịch hẹn / bệnh nhân</div>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "center", gap: 10, border: `1.5px solid ${T.line}`, borderRadius: 13, padding: "0 14px" }}>
-            <Search size={18} color={T.sub} /><input value={ma} onChange={(e) => setMa(e.target.value)} onKeyDown={(e) => e.key === "Enter" && search()} placeholder="Nhập mã lịch hẹn (VD: BV3K9XA)..." style={{ flex: 1, border: "none", outline: "none", padding: "13px 0", fontSize: 15, fontFamily: "inherit", background: "transparent" }} />
+            <Search size={18} color={T.sub} /><input value={ma} onChange={(e) => setMa(e.target.value)} onKeyDown={(e) => e.key === "Enter" && search()} placeholder="Nhập mã lịch hẹn hoặc mã bệnh nhân (VD: BV3K9XA, BN12345678)..." style={{ flex: 1, border: "none", outline: "none", padding: "13px 0", fontSize: 15, fontFamily: "inherit", background: "transparent" }} />
           </div>
           <Btn onClick={search}>Tra cứu</Btn>
         </div>
         {searchErr && <div style={{ background: "#FDECEA", color: "#C0392B", fontSize: 13.5, padding: "10px 14px", borderRadius: 12, marginTop: 14 }}>{searchErr}</div>}
-        {found && <div style={{ marginTop: 14 }}><ReceptionRow r={found} /></div>}
+        {found && found.length > 0 && (
+          <div style={{ marginTop: 14, display: "grid", gap: 10 }}>
+            {found.length > 1 && <div style={{ fontSize: 13, color: T.sub }}>Tìm thấy {found.length} lịch hẹn của bệnh nhân:</div>}
+            {found.map((r) => <ReceptionRow key={r.dbId} r={r} />)}
+          </div>
+        )}
       </Card>
       {/* Lịch hẹn theo ngày: bấm một ngày để tra cứu; danh sách chỉ hiện sau khi tra */}
       <Card style={{ padding: 20, marginBottom: 22 }}>

@@ -16,6 +16,7 @@ const VAI_TRO = {
   benh_nhan: { l: "Bệnh nhân", tone: T.peach, soft: T.peachSoft },
   le_tan: { l: "Lễ tân", tone: T.gold, soft: T.goldSoft },
   bac_si: { l: "Bác sĩ", tone: T.sky, soft: T.skySoft },
+  quan_ly: { l: "Quản lý", tone: T.mint, soft: T.mintSoft },
   admin: { l: "Quản trị viên", tone: T.lav, soft: T.lavSoft },
 };
 
@@ -30,6 +31,10 @@ export default function AdminUsers() {
   const [pwFor, setPwFor] = useState(null); // id tài khoản đang đặt lại mật khẩu
   const [pw, setPw] = useState("");
   const [pwBusy, setPwBusy] = useState(false);
+  const [selfOpen, setSelfOpen] = useState(false); // form đổi mật khẩu của chính admin
+  const [sf, setSf] = useState({ cu: "", moi: "", xn: "" });
+  const [selfBusy, setSelfBusy] = useState(false);
+  const supd = (k) => (e) => setSf((s) => ({ ...s, [k]: e.target.value }));
 
   const load = () => {
     if (!live) return;
@@ -42,9 +47,29 @@ export default function AdminUsers() {
   useEffect(load, [online]);
 
   const toggle = async (u) => {
-    if (!window.confirm(`${u.trang_thai ? "Khóa" : "Mở khóa"} tài khoản "${u.ho_ten}"?`)) return;
-    try { await api.toggleUser(u.id); load(); }
-    catch (e) { setErr(e.message); }
+    const moKhoa = !u.trang_thai;
+    if (!window.confirm(`${moKhoa ? "Bỏ khóa" : "Khóa"} tài khoản "${u.ho_ten}"?`)) return;
+    setErr(null);
+    try {
+      await api.toggleUser(u.id);
+      setMsg(moKhoa
+        ? `Đã bỏ khóa "${u.ho_ten}" — tài khoản đăng nhập lại được.`
+        : `Đã khóa "${u.ho_ten}" — tài khoản không đăng nhập được cho tới khi bỏ khóa.`);
+      load();
+    } catch (e) { setErr(e.message); }
+  };
+
+  const saveSelf = async () => {
+    setErr(null);
+    if (sf.moi.length < 6) { setErr("Mật khẩu mới phải có ít nhất 6 ký tự."); return; }
+    if (sf.moi !== sf.xn) { setErr("Xác nhận mật khẩu mới không khớp."); return; }
+    setSelfBusy(true);
+    try {
+      await api.changeMyPassword(sf.cu, sf.moi);
+      setSelfOpen(false); setSf({ cu: "", moi: "", xn: "" });
+      setMsg("Đã đổi mật khẩu của bạn — lần đăng nhập sau hãy dùng mật khẩu mới.");
+    } catch (e) { setErr(e.message); }
+    finally { setSelfBusy(false); }
   };
 
   const savePw = async (u) => {
@@ -71,11 +96,31 @@ export default function AdminUsers() {
   const data = list || [];
   return (
     <div>
-      <PageTitle title="Người dùng & Phân quyền" sub="Mỗi nhân sự một tên đăng nhập riêng với quyền theo vai trò." action={<Btn kind="lav" onClick={() => { setMsg(null); setAdding(true); }}><Plus size={16} /> Tạo tài khoản</Btn>} />
+      <PageTitle title="Người dùng & Phân quyền" sub="Mỗi nhân sự một tên đăng nhập riêng với quyền theo vai trò." action={
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Btn kind="ghost" onClick={() => { setMsg(null); setErr(null); setSelfOpen((v) => !v); }}><KeyRound size={16} /> Đổi mật khẩu của tôi</Btn>
+          <Btn kind="lav" onClick={() => { setMsg(null); setAdding(true); }}><Plus size={16} /> Tạo tài khoản</Btn>
+        </div>
+      } />
       <Card style={{ padding: "14px 18px", marginBottom: 14, background: T.lavSoft, border: "none", fontSize: 13.5, color: T.ink }}>
         <KeyRound size={14} style={{ verticalAlign: -2 }} /> Mật khẩu được mã hóa một chiều (bcrypt) trong database nên <b>không thể xem lại</b> — chỉ có thể cấp mật khẩu mới bằng nút "Đặt mật khẩu".
         Các tài khoản demo có sẵn (benhnhan / letan / bacsi / admin @demo.vn) dùng mật khẩu <b>123456</b>.
       </Card>
+      {selfOpen && (
+        <Card style={{ padding: 20, marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, color: T.ink, fontSize: 15, marginBottom: 4 }}>Đổi mật khẩu của tôi</div>
+          <div style={{ color: T.sub, fontSize: 13, marginBottom: 14 }}>Đổi mật khẩu cho tài khoản đang đăng nhập ({store.user?.email || store.user?.ho_ten || "quản trị viên"}). Cần nhập đúng mật khẩu hiện tại.</div>
+          <div style={{ display: "grid", gap: 12, maxWidth: 360 }}>
+            <input type="password" value={sf.cu} onChange={supd("cu")} placeholder="Mật khẩu hiện tại" autoComplete="current-password" style={input} />
+            <input type="password" value={sf.moi} onChange={supd("moi")} placeholder="Mật khẩu mới (≥ 6 ký tự)" autoComplete="new-password" style={input} />
+            <input type="password" value={sf.xn} onChange={supd("xn")} placeholder="Nhập lại mật khẩu mới" autoComplete="new-password" style={input} />
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            <Btn kind="ghost" onClick={() => { setSelfOpen(false); setSf({ cu: "", moi: "", xn: "" }); setErr(null); }}><X size={14} /> Hủy</Btn>
+            <Btn kind="lav" disabled={selfBusy} onClick={saveSelf}><CheckCircle2 size={16} /> {selfBusy ? "Đang lưu..." : "Đổi mật khẩu"}</Btn>
+          </div>
+        </Card>
+      )}
       {msg && <Card style={{ padding: 16, marginBottom: 14, background: T.mintSoft, border: "none", color: T.ink, fontSize: 14 }}><CheckCircle2 size={15} style={{ verticalAlign: -3, color: T.mint }} /> {msg}</Card>}
       {loading && <div style={{ color: T.sub, fontSize: 14, marginBottom: 12 }}>Đang tải danh sách tài khoản...</div>}
       {err && <Card style={{ padding: 18, marginBottom: 14, background: "#FDECEA", border: "none", color: "#C0392B", fontSize: 14 }}>{err}</Card>}
@@ -107,9 +152,11 @@ export default function AdminUsers() {
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <Btn kind="ghost" size="sm" onClick={() => { setPwFor(pwFor === u.id ? null : u.id); setPw(""); setErr(null); }}><KeyRound size={14} /> Đặt mật khẩu</Btn>
-                <Btn kind="ghost" size="sm" style={u.trang_thai ? { color: "#C0392B", borderColor: "#FDECEA" } : {}} onClick={() => toggle(u)}>
-                  {u.trang_thai ? <><Lock size={14} /> Khóa</> : <><Unlock size={14} /> Mở khóa</>}
-                </Btn>
+                {u.trang_thai ? (
+                  <Btn kind="ghost" size="sm" style={{ color: "#C0392B", borderColor: "#FDECEA" }} onClick={() => toggle(u)}><Lock size={14} /> Khóa</Btn>
+                ) : (
+                  <Btn kind="mint" size="sm" onClick={() => toggle(u)}><Unlock size={14} /> Bỏ khóa</Btn>
+                )}
               </div>
             </Card>
           );
@@ -179,6 +226,7 @@ function UserForm({ onBack, onSaved }) {
             <select value={f.vai_tro} onChange={upd("vai_tro")} style={{ ...input, background: T.surface }}>
               <option value="bac_si">Bác sĩ — hàng chờ khám, ghi kết quả, hồ sơ bệnh nhân</option>
               <option value="le_tan">Lễ tân — tiếp đón, check-in, hồ sơ bệnh nhân</option>
+              <option value="quan_ly">Quản lý — chỉ giám sát hoạt động khám và doanh thu theo khoa</option>
               <option value="admin">Quản trị viên — toàn quyền hệ thống</option>
             </select>
           </FormField>

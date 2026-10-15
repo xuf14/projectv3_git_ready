@@ -1,6 +1,6 @@
 import {
   Entity, PrimaryGeneratedColumn, Column, ManyToOne, OneToMany, OneToOne,
-  JoinColumn, CreateDateColumn,
+  JoinColumn, CreateDateColumn, UpdateDateColumn, Unique, Index,
 } from 'typeorm';
 
 // ---- Vai trò ----
@@ -8,6 +8,9 @@ export enum VaiTro {
   BENH_NHAN = 'benh_nhan',
   LE_TAN = 'le_tan',
   BAC_SI = 'bac_si',
+  // Quản lý: chỉ GIÁM SÁT (hoạt động khám + doanh thu theo khoa), không nhập liệu
+  // nghiệp vụ và không quản trị hệ thống. Cột vai_tro là varchar nên không cần migration.
+  QUAN_LY = 'quan_ly',
   ADMIN = 'admin',
 }
 
@@ -60,6 +63,81 @@ export class DichVu {
   @Column() ten_dich_vu: string;
   @Column({ type: 'int', default: 0 }) gia: number;
   @ManyToOne(() => KhoaPhong, (k) => k.dich_vu) @JoinColumn({ name: 'khoa_id' }) khoa: KhoaPhong;
+}
+
+// Danh mục VẬT TƯ TIÊU HAO người bệnh có thể phải chi trả (sản phụ khoa).
+// Nguồn để lễ tân chọn dòng vật tư khi lập phiếu viện phí và để tổng hợp báo cáo
+// số lượng — chi phí thực tế vẫn lấy từ chi_tiet_y_lenh của từng phiếu.
+@Entity('vat_tu_tieu_hao')
+export class VatTuTieuHao {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) ma_vt: string;
+  @Column() ten: string;
+  @Column({ type: 'int' }) nhom_id: number;
+  @Column() nhom_ten: string;
+  // Mã các khoa thường dùng vật tư này (san, phu, ivf, sosinh) — dùng để lọc
+  @Column({ type: 'simple-array', nullable: true }) khoa: string[];
+  @Column({ nullable: true }) dvt: string;
+  // Giá thu niêm yết (0 = chưa phê duyệt giá, lễ tân nhập tay khi lập phiếu)
+  @Column({ type: 'int', default: 0 }) don_gia: number;
+  @Column({ type: 'text', nullable: true }) ghi_chu: string;
+  @Column({ default: true }) hoat_dong: boolean;
+}
+
+// Danh mục THUỐC sản phụ khoa dùng trong bệnh viện. Nguồn cho ô chọn thuốc của
+// bác sĩ (kê đơn) lẫn của lễ tân (chi tiết viện phí); mã thuốc là khóa ổn định
+// để trừ tồn kho ở tủ thuốc.
+@Entity('thuoc')
+export class Thuoc {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) ma_thuoc: string;
+  @Column() hoat_chat: string;
+  @Column({ nullable: true }) nhom: string;
+  // Mức kiểm soát kê đơn (Nguy cơ cao, Hạn chế, Kê đơn...) — nhắc người nhập
+  @Column({ nullable: true }) kiem_soat: string;
+  @Column({ type: 'text', nullable: true }) ung_dung: string;
+  @Column({ nullable: true }) dvt: string;
+  // Giá thu niêm yết (0 = chưa phê duyệt giá, người lập phiếu nhập tay)
+  @Column({ type: 'int', default: 0 }) don_gia: number;
+  @Column({ default: true }) hoat_dong: boolean;
+}
+
+// TỒN KHO — mỗi dòng là một mặt hàng trong tủ thuốc (loai='thuoc') hoặc tủ vật
+// tư tiêu hao (loai='vat_tu'). Số lượng bị trừ khi lễ tân lập phiếu y lệnh và
+// được cộng lại khi nhập kho. Cặp (loai, ma) là khóa nghiệp vụ duy nhất.
+@Entity('ton_kho')
+@Unique('uq_ton_kho_loai_ma', ['loai', 'ma'])
+export class TonKho {
+  @PrimaryGeneratedColumn() id: number;
+  @Column() loai: string;                 // thuoc | vat_tu
+  @Column() ma: string;                   // ma_thuoc hoặc ma_vt của danh mục
+  @Column() ten: string;
+  @Column({ nullable: true }) dvt: string;
+  // Đơn giá kho: dùng để tính GIÁ TRỊ TỒN KHO và là giá điền sẵn cho dòng
+  // thuốc/vật tư trên phiếu viện phí. Sửa qua nhập kho hoặc POST /kho/gia.
+  @Column({ type: 'int', default: 0 }) don_gia: number;
+  @Column({ type: 'float', default: 0 }) so_luong: number;
+  @Column({ type: 'float', default: 0 }) ton_toi_thieu: number;  // dưới mức này = cảnh báo sắp hết
+  @Column({ default: true }) hoat_dong: boolean;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+}
+
+// NHẬT KÝ KHO — mọi lần nhập, xuất (do phiếu y lệnh) và điều chỉnh kiểm kê.
+// so_luong dương = nhập vào, âm = xuất ra; ton_sau là tồn ngay sau giao dịch.
+@Entity('nhat_ky_kho')
+export class NhatKyKho {
+  @PrimaryGeneratedColumn() id: number;
+  @Column() loai_gd: string;              // nhap | xuat | dieu_chinh
+  @Column({ type: 'float' }) so_luong: number;
+  @Column({ type: 'float' }) ton_truoc: number;
+  @Column({ type: 'float' }) ton_sau: number;
+  @Column({ nullable: true }) ma_phieu: string;   // mã phiếu y lệnh gây ra xuất kho
+  @Column({ type: 'text', nullable: true }) ghi_chu: string;
+  @CreateDateColumn() thoi_gian: Date;
+
+  @ManyToOne(() => TonKho, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'ton_kho_id' }) ton_kho: TonKho;
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_dung_id' }) nguoi_dung: NguoiDung;
 }
 
 @Entity('ho_so_benh_nhan')
@@ -148,6 +226,11 @@ export class DonThuoc {
   @Column({ type: 'text', nullable: true }) danh_sach_thuoc: string;
   @Column({ type: 'text', nullable: true }) lieu_dung: string;
   @Column({ type: 'text', nullable: true }) ghi_chu: string;
+  // Bản CẤU TRÚC của đơn thuốc (JSON mảng {ten, so_luong, dvt, lieu_dung, cach_dung})
+  // khi bác sĩ kê bằng cách chọn từ danh mục thuốc. Đây là nguồn để lễ tân nạp
+  // thẳng vào "Chi tiết viện phí"; danh_sach_thuoc vẫn giữ bản chữ để các màn
+  // hình cũ (lịch sử khám, tái khám) hiển thị như trước.
+  @Column({ type: 'text', nullable: true }) danh_sach_json: string;
   @OneToOne(() => LuotKham, (v) => v.don_thuoc) @JoinColumn({ name: 'luot_kham_id' }) luot_kham: LuotKham;
 }
 
@@ -370,6 +453,41 @@ export class DienBienDieuTri {
   @JoinColumn({ name: 'bac_si_id' }) bac_si: NguoiDung;
 }
 
+// CHUYỂN KHOA ĐIỀU TRỊ — nằm trong phiếu điều trị: bác sĩ hoặc lễ tân đề nghị
+// chuyển người bệnh sang khoa khác điều trị tiếp. Việc chuyển CHỈ có hiệu lực khi
+// bác sĩ của khoa đến xác nhận tiếp nhận; trước đó người bệnh vẫn thuộc khoa cũ.
+// Mỗi phiếu khám chỉ được có MỘT đề nghị đang chờ — chốt bằng unique index bộ
+// phận ở database, không dựa vào kiểm tra ở tầng ứng dụng (chống gửi trùng).
+@Entity('chuyen_khoa')
+@Index('uq_chuyen_khoa_dang_cho', ['phieu_kham'], {
+  unique: true, where: `"trang_thai" = 'cho_tiep_nhan'`,
+})
+export class ChuyenKhoa {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) ma_phieu: string;
+  // cho_tiep_nhan | da_tiep_nhan | tu_choi | da_huy
+  @Column({ default: 'cho_tiep_nhan' }) trang_thai: string;
+  @Column({ type: 'text' }) ly_do: string;
+  @Column({ type: 'text', nullable: true }) tinh_trang_nb: string; // tình trạng người bệnh lúc chuyển
+  @Column({ type: 'text', nullable: true }) ly_do_ket_thuc: string; // lý do khoa từ chối / người tạo hủy
+  @CreateDateColumn() thoi_gian_tao: Date;
+  @Column({ type: 'timestamp', nullable: true }) thoi_gian_xu_ly: Date;
+
+  @ManyToOne(() => PhieuKhamBenh, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'phieu_kham_id' }) phieu_kham: PhieuKhamBenh;
+  // Khoa đang điều trị lúc đề nghị — máy chủ tự suy ra, null nếu chưa xác định được
+  @ManyToOne(() => KhoaPhong, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'khoa_di_id' }) khoa_di: KhoaPhong;
+  // Khoa đến là nội dung cốt lõi của phiếu nên không cho SET NULL khi xóa khoa
+  @ManyToOne(() => KhoaPhong, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'khoa_den_id' }) khoa_den: KhoaPhong;
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_tao_id' }) nguoi_tao: NguoiDung;
+  // Người của khoa đến đã tiếp nhận, hoặc người đã từ chối/hủy phiếu
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_xu_ly_id' }) nguoi_xu_ly: NguoiDung;
+}
+
 // ============================================================================
 // QUY TRÌNH KHÁM 6 BƯỚC (theo tài liệu thiết kế): mỗi "lần khám" = một LichHen.
 // Bước 1 Tiếp đón dùng lich_hen; bước 6 Thanh toán dùng thanh_toan.
@@ -479,6 +597,24 @@ export class NhatKyHoatDong {
   @JoinColumn({ name: 'nguoi_dung_id' }) nguoi_dung: NguoiDung;
 }
 
+// Thông báo trong hệ thống gửi tới từng tài khoản (bác sĩ, quản trị viên...).
+// VD: lễ tân tạo lịch tái khám → bác sĩ phụ trách và admin nhận thông báo.
+@Entity('thong_bao')
+export class ThongBao {
+  @PrimaryGeneratedColumn() id: number;
+  @Column() loai: string;                                  // tai_kham | ...
+  @Column() tieu_de: string;
+  @Column({ type: 'text', nullable: true }) noi_dung: string;
+  @Column({ type: 'boolean', default: false }) da_doc: boolean;
+  @CreateDateColumn() thoi_gian: Date;
+
+  @ManyToOne(() => NguoiDung, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'nguoi_nhan_id' }) nguoi_nhan: NguoiDung;
+  // Lịch hẹn liên quan (nếu có) — xóa lịch thì thông báo vẫn còn nhưng bỏ liên kết
+  @ManyToOne(() => LichHen, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'lich_hen_id' }) lich_hen: LichHen;
+}
+
 // ============================================================================
 // PHÂN HỆ TRUYỀN THÔNG (theo tài liệu thiết kế tin tức & truyền thông):
 // bài viết + hình ảnh lưu trong PostgreSQL, tra cứu theo ngày đăng.
@@ -525,4 +661,237 @@ export class TinTuc {
   @Column({ type: 'text', nullable: true }) noi_dung: string;
   @Column({ nullable: true }) anh: string;
   @CreateDateColumn() ngay_dang: Date;
+}
+
+// ============================================================================
+// HỖ TRỢ SINH SẢN (IVF) — hồ sơ điều trị hiếm muộn theo TỪNG BỆNH NHÂN, kéo
+// dài nhiều buổi. Hai giai đoạn: khám hiếm muộn (8 bước) → làm IVF (10 bước).
+// Bác sĩ khoa Hỗ trợ sinh sản đánh dấu tiến độ; có thể "làm thẳng IVF".
+// ============================================================================
+@Entity('ho_so_ivf')
+export class HoSoIVF {
+  @PrimaryGeneratedColumn() id: number;
+  // kham_hiem_muon | ivf | hoan_tat
+  @Column({ default: 'kham_hiem_muon' }) giai_doan: string;
+  // Danh sách chỉ số bước ĐÃ HOÀN THÀNH của mỗi giai đoạn (1..8 và 1..10)
+  @Column({ type: 'simple-json', nullable: true }) buoc_kham: number[];
+  @Column({ type: 'simple-json', nullable: true }) buoc_ivf: number[];
+  @Column({ default: false }) lam_thang_ivf: boolean;  // bỏ qua khám, vào thẳng IVF
+  @Column({ type: 'text', nullable: true }) ghi_chu: string;
+  @CreateDateColumn() ngay_tao: Date;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+
+  // Mỗi bệnh nhân một hồ sơ IVF (ràng buộc duy nhất ở tầng ứng dụng)
+  @ManyToOne(() => HoSoBenhNhan, { eager: true, onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'ho_so_id' }) ho_so: HoSoBenhNhan;
+  // Bác sĩ cập nhật gần nhất
+  @ManyToOne(() => BacSi, { nullable: true, eager: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'bac_si_id' }) bac_si: BacSi;
+}
+
+// ============================================================================
+// ĐĂNG KÝ KHÁM ONLINE — bệnh nhân (mới hoặc cũ) tự điền thông tin trên trang
+// công khai để đến khám tại một khoa phòng. Bản ghi vào hàng chờ của lễ tân ở
+// trang Tiếp đón (trang_thai: cho_tiep_don → da_tiep_nhan | da_huy). Đây là
+// phiếu đăng ký, KHÔNG phải hồ sơ bệnh án; lễ tân mới tạo hồ sơ/lịch khám thật.
+// ============================================================================
+@Entity('dang_ky_kham')
+export class DangKyKham {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) ma_dang_ky: string;            // mã ngẫu nhiên có quy luật: DK + 8 số
+  @Column() ho_ten: string;
+  @Column({ type: 'date', nullable: true }) ngay_sinh: string;
+  @Column({ nullable: true }) gioi_tinh: string;
+  @Column() sdt: string;                                   // bắt buộc để lễ tân liên hệ
+  @Column({ nullable: true }) email: string;
+  @Column({ type: 'text', nullable: true }) dia_chi: string;
+  @Column({ default: false }) benh_nhan_cu: boolean;       // bệnh nhân tự khai là đã từng khám
+  @Column({ nullable: true }) ma_benh_nhan_cu: string;     // mã BN cũ (nếu bệnh nhân nhớ)
+  @Column({ type: 'text', nullable: true }) ly_do: string; // lý do / triệu chứng
+  @Column({ type: 'date', nullable: true }) ngay_mong_muon: string; // ngày mong muốn đến khám
+  @Column({ nullable: true }) gio_mong_muon: string;       // giờ mong muốn (HH:mm)
+  @Column({ default: 'cho_tiep_don' }) trang_thai: string; // cho_tiep_don | da_tiep_nhan | da_huy
+  @Column({ type: 'text', nullable: true }) ghi_chu_le_tan: string;
+  @CreateDateColumn() ngay_tao: Date;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+
+  // Khoa muốn khám (tùy chọn) — SET NULL để giữ phiếu khi khoa bị xóa
+  @ManyToOne(() => KhoaPhong, { nullable: true, eager: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'khoa_id' }) khoa: KhoaPhong;
+  // Lễ tân đã xử lý phiếu — SET NULL để giữ lịch sử
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_xu_ly_id' }) nguoi_xu_ly: NguoiDung;
+  // Lễ tân xác nhận phiếu → hồ sơ bệnh nhân (mới tạo hoặc hồ sơ cũ được gắn) và
+  // lịch khám thật với bác sĩ của khoa; lịch này là nguồn hiển thị ở cổng bác sĩ
+  @ManyToOne(() => HoSoBenhNhan, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'ho_so_id' }) ho_so: HoSoBenhNhan;
+  @ManyToOne(() => LichHen, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'lich_hen_id' }) lich_hen: LichHen;
+}
+
+// ============================================================================
+// PHIẾU RA VIỆN — y lệnh ra viện chính thức do BÁC SĨ ĐIỀU TRỊ lập ở cổng bác sĩ,
+// kèm kết luận tình trạng sức khỏe. Là điều kiện để lễ tân được tích "Đăng ký ra
+// viện (ĐKRV)" trên phiếu khám: chỉ khi tình trạng an toàn về nhà (hồi phục / qua
+// giai đoạn nguy hiểm) + đã thanh toán đủ viện phí.
+// ============================================================================
+@Entity('phieu_ra_vien')
+export class PhieuRaVien {
+  @PrimaryGeneratedColumn() id: number;
+  // hoi_phuc | qua_nguy_hiem | chuyen_vien | nang_hon | tu_vong
+  @Column({ default: 'hoi_phuc' }) tinh_trang: string;
+  @Column({ type: 'text', nullable: true }) ket_luan_suc_khoe: string;
+  @Column({ type: 'text', nullable: true }) chan_doan_ra_vien: string;
+  @Column({ type: 'date', nullable: true }) ngay_ra_vien: string;
+  @Column({ default: 'hieu_luc' }) trang_thai: string; // hieu_luc | da_huy
+  @CreateDateColumn() ngay_tao: Date;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+
+  @ManyToOne(() => HoSoBenhNhan, { eager: true, onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'ho_so_id' }) ho_so: HoSoBenhNhan;
+  // Bác sĩ điều trị lập phiếu — SET NULL giữ lịch sử khi tài khoản bị xóa
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'bac_si_id' }) bac_si: NguoiDung;
+}
+
+// ============================================================================
+// NHẬP VIỆN "MỘT CHẠM" (đặc tả Quy trình nhập viện một chạm, bản 1.0):
+//   Giuong          — danh mục phòng/giường theo khoa, quản trị viên cấu hình
+//   YeuCauNhapVien  — bác sĩ ký ở bước 5 kết luận; THAM CHIẾU hồ sơ + lần khám,
+//                     KHÔNG sao chép dữ liệu bệnh nhân
+//   DotNoiTru       — đợt điều trị nội trú, sinh ra khi lễ tân xác nhận nhập viện
+// Ba điểm kiểm soát: bác sĩ ký → lễ tân xác minh & phân giường → khoa tiếp nhận.
+// ============================================================================
+
+@Entity('giuong')
+@Unique('uq_giuong_khoa_ma', ['khoa', 'ma'])
+export class Giuong {
+  @PrimaryGeneratedColumn() id: number;
+  @Column() ma: string;                       // mã giường trong khoa, VD "P201-G3"
+  @Column() phong: string;                    // số/tên phòng
+  @Column({ default: 'thuong' }) loai: string; // thuong | dich_vu
+  // trong | dang_dung | bao_tri — dang_dung do đợt nội trú giữ, không sửa tay
+  @Column({ default: 'trong' }) trang_thai: string;
+  @Column({ default: true }) hoat_dong: boolean;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+
+  @ManyToOne(() => KhoaPhong, { eager: true, onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'khoa_id' }) khoa: KhoaPhong;
+}
+
+@Entity('yeu_cau_nhap_vien')
+export class YeuCauNhapVien {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) ma_yeu_cau: string;
+  // cho_tiep_nhan | dang_xac_minh | cho_giuong | da_nhap_vien | khoa_da_nhan
+  // | tu_choi | da_huy | chuyen_vien
+  @Column({ default: 'cho_tiep_nhan' }) trang_thai: string;
+  // cap_cuu | khan | thuong | theo_lich — quyết định thứ tự hàng chờ của lễ tân
+  @Column({ default: 'thuong' }) uu_tien: string;
+  @Column({ type: 'text', nullable: true }) ly_do_uu_tien: string;
+  @Column() chan_doan_chinh: string;
+  @Column({ nullable: true }) ma_icd: string;
+  @Column({ type: 'text' }) ly_do: string;
+  @Column({ type: 'text', nullable: true }) canh_bao: string;   // dị ứng, cách ly...
+  @Column({ default: 'di_bo' }) ho_tro_di_chuyen: string;       // di_bo | xe_lan | cang
+  @Column({ type: 'date', nullable: true }) ngay_du_kien: string;
+  @Column({ type: 'text', nullable: true }) ly_do_ket_thuc: string; // lý do hủy/từ chối
+  // Kết quả xác minh hành chính của lễ tân, chép sang đợt nội trú khi xác nhận
+  @Column({ default: 'vien_phi' }) doi_tuong_tt: string;        // bhyt | vien_phi | bao_lanh
+  @Column({ default: 'chua_xac_minh' }) bhyt_trang_thai: string; // chua_xac_minh | hop_le | khong_co
+  @Column({ type: 'text', nullable: true }) ghi_chu_tiep_nhan: string;
+  // Tăng mỗi lần bác sĩ ký lại nội dung — giữ dấu vết bản đã ký, không sửa âm thầm
+  @Column({ type: 'int', default: 1 }) phien_ban: number;
+  @CreateDateColumn() thoi_gian_ky: Date;
+  @Column({ type: 'timestamp', nullable: true }) thoi_gian_tiep_nhan: Date;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+
+  @ManyToOne(() => HoSoBenhNhan, { eager: true, onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'ho_so_id' }) ho_so: HoSoBenhNhan;
+  // Lần khám sinh ra yêu cầu — nguồn của chẩn đoán, sinh hiệu, cận lâm sàng
+  @ManyToOne(() => LichHen, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'lich_hen_id' }) lich_hen: LichHen;
+  @ManyToOne(() => KhoaPhong, { eager: true, nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'khoa_id' }) khoa: KhoaPhong;
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'bac_si_id' }) bac_si: NguoiDung;
+  // Lễ tân đã "Tiếp nhận" hồ sơ — chống hai người cùng xử lý một yêu cầu
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_tiep_nhan_id' }) nguoi_tiep_nhan: NguoiDung;
+
+  // Quản lý duyệt nhập viện — duyệt được ở bất kỳ bước nào trước khi khoa nhận
+  // người bệnh, và là ĐIỀU KIỆN BẮT BUỘC để khoa xác nhận đã tiếp nhận.
+  // thoi_gian_duyet khác null nghĩa là đã duyệt.
+  @Column({ type: 'timestamp', nullable: true }) thoi_gian_duyet: Date;
+  @Column({ type: 'text', nullable: true }) ghi_chu_duyet: string;
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_duyet_id' }) nguoi_duyet: NguoiDung;
+}
+
+@Entity('dot_noi_tru')
+export class DotNoiTru {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) so_vao_vien: string;
+  @Column({ default: 'dang_dieu_tri' }) trang_thai: string; // dang_dieu_tri | da_ra_vien
+  @Column({ default: 'vien_phi' }) doi_tuong_tt: string;    // bhyt | vien_phi | bao_lanh
+  // chua_xac_minh | hop_le | khong_co — cấp cứu được vào khoa khi chưa xác minh
+  @Column({ default: 'chua_xac_minh' }) bhyt_trang_thai: string;
+  @Column({ type: 'text', nullable: true }) ghi_chu: string;
+  @CreateDateColumn() thoi_gian_vao: Date;
+  @Column({ type: 'timestamp', nullable: true }) thoi_gian_khoa_nhan: Date;
+  @Column({ type: 'timestamp', nullable: true }) thoi_gian_ra: Date;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+
+  // Một yêu cầu chỉ tạo được MỘT đợt nội trú (ràng buộc chống trùng của tài liệu)
+  @OneToOne(() => YeuCauNhapVien, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'yeu_cau_id' }) yeu_cau: YeuCauNhapVien;
+  @ManyToOne(() => HoSoBenhNhan, { eager: true, onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'ho_so_id' }) ho_so: HoSoBenhNhan;
+  @ManyToOne(() => KhoaPhong, { eager: true, nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'khoa_id' }) khoa: KhoaPhong;
+  @ManyToOne(() => Giuong, { eager: true, nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'giuong_id' }) giuong: Giuong;
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_lam_thu_tuc_id' }) nguoi_lam_thu_tuc: NguoiDung;
+  // Người của khoa xác nhận đã nhận bệnh nhân (bác sĩ khoa — hệ thống chưa có
+  // vai trò điều dưỡng riêng)
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_khoa_nhan_id' }) nguoi_khoa_nhan: NguoiDung;
+}
+
+// ============================================================================
+// ĐIỀU PHỐI BỆNH NHÂN VÀO KHOA PHÒNG — ba điểm kiểm soát, ba vai trò:
+//   1. LỄ TÂN   tiếp đón (check-in) → bản ghi điều phối tự sinh, trạng thái
+//               cho_duyet, vào hàng chờ của quản lý
+//   2. QUẢN LÝ  duyệt khoa tiếp nhận + chỉ định bác sĩ → da_chi_dinh.
+//               Chỉ định của quản lý là quyết định cuối: bệnh nhân chuyển sang
+//               hàng chờ của bác sĩ được chỉ định, kể cả khi lịch hẹn ban đầu
+//               đặt với bác sĩ khác (xem hangCho ở appointment.module).
+//   3. LỄ TÂN   xác nhận đã đưa người bệnh tới phòng → da_chuyen_phong
+// Mỗi lần khám chỉ có MỘT bản ghi điều phối (quan hệ một - một).
+// ============================================================================
+@Entity('dieu_phoi_benh_nhan')
+export class DieuPhoiBenhNhan {
+  @PrimaryGeneratedColumn() id: number;
+  // cho_duyet | da_chi_dinh | da_chuyen_phong | tu_choi
+  @Column({ default: 'cho_duyet' }) trang_thai: string;
+  @Column({ nullable: true }) phong: string;            // phòng khám lễ tân đưa tới
+  @Column({ type: 'text', nullable: true }) ghi_chu: string;        // ghi chú của quản lý
+  @Column({ type: 'text', nullable: true }) ly_do_tu_choi: string;
+  @CreateDateColumn() thoi_gian_tiep_don: Date;
+  @Column({ type: 'timestamp', nullable: true }) thoi_gian_chi_dinh: Date;
+  @Column({ type: 'timestamp', nullable: true }) thoi_gian_chuyen_phong: Date;
+  @UpdateDateColumn() ngay_cap_nhat: Date;
+
+  @OneToOne(() => LichHen, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'lich_hen_id' }) lich_hen: LichHen;
+  // Khoa quản lý duyệt cho người bệnh vào — có thể khác khoa đặt lịch ban đầu
+  @ManyToOne(() => KhoaPhong, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'khoa_id' }) khoa: KhoaPhong;
+  @ManyToOne(() => BacSi, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'bac_si_id' }) bac_si: BacSi;
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_duyet_id' }) nguoi_duyet: NguoiDung;
+  @ManyToOne(() => NguoiDung, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'nguoi_chuyen_phong_id' }) nguoi_chuyen_phong: NguoiDung;
 }

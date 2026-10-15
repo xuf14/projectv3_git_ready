@@ -1,14 +1,18 @@
 import {
-  Injectable, Controller, Get, Post, Patch, Body, Param, Request, UseGuards,
-  BadRequestException, NotFoundException,
+  Injectable, Controller, Get, Post, Patch, Delete, Body, Param, Request, UseGuards,
+  BadRequestException, NotFoundException, ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, EntityManager, In } from 'typeorm';
+import { Repository, DataSource, EntityManager, In, Not } from 'typeorm';
 import {
   LichHen, TrangThaiLich, SinhHieu, KhamLamSang, ChiDinhCLS, KetLuanKham,
-  ThanhToan, DichVu, NhatKyHoatDong, VaiTro,
+  ThanhToan, DichVu, NhatKyHoatDong, VaiTro, BacSi, NguoiDung,
 } from './entities';
 import { JwtAuthGuard, RolesGuard, Roles } from './auth';
+import { phamViBacSi } from './pham-vi-bac-si';
+import { guiThongBao, idQuanTriVien } from './notification.module';
+import { ApptService } from './appointment.module';
+import { NhapVienService } from './nhap-vien.module';
 
 // ============================================================================
 // QUY TRÌNH KHÁM 6 BƯỚC (mục 6 tài liệu thiết kế). Mỗi lần khám = một LichHen:
@@ -39,6 +43,10 @@ export class EncounterService {
     @InjectRepository(KetLuanKham) private kl: Repository<KetLuanKham>,
     @InjectRepository(ThanhToan) private tt: Repository<ThanhToan>,
     private ds: DataSource,
+    // Dùng lại đúng cách đặt lịch tái khám của lễ tân (khung giờ + lịch hẹn thật)
+    private appt: ApptService,
+    // Yêu cầu nhập viện được ký ngay tại bước 5, cùng transaction với kết luận
+    private nhapVien: NhapVienService,
   ) {}
 
   private ghiNhatKy(m: EntityManager, userId: number, hanhDong: string, noiDung: string) {
@@ -47,9 +55,25 @@ export class EncounterService {
     }));
   }
 
-  private async layLich(id: number) {
+  // Bác sĩ gắn với tài khoản đang đăng nhập; null = lễ tân/admin (xem toàn bộ).
+  // Tài khoản bác sĩ chưa gắn hồ sơ bác sĩ bị TỪ CHỐI (xem pham-vi-bac-si.ts).
+  private async bacSiCuaUser(user: any): Promise<BacSi | null> {
+    if (!user) return null;
+    return (await phamViBacSi(this.ds, user)).bs;
+  }
+
+  // Nạp lần khám. Khi có user là bác sĩ đã gắn hồ sơ, chặn thao tác trên lịch
+  // của bác sĩ khác — chỉ bác sĩ được phân công mới được khám bệnh nhân đó.
+  private async layLich(id: number, user?: any) {
     const lich = await this.lich.findOne({ where: { id } });
     if (!lich) throw new NotFoundException('Lịch hẹn (lần khám) không tồn tại');
+    if (user) {
+      const bs = await this.bacSiCuaUser(user);
+      if (bs) {
+        const chuLich = lich.khung_gio && lich.khung_gio.bac_si ? lich.khung_gio.bac_si.id : null;
+        if (chuLich !== bs.id) throw new ForbiddenException('Lần khám này thuộc bác sĩ khác');
+      }
+    }
     return lich;
   }
 
@@ -68,17 +92,20 @@ export class EncounterService {
     };
   }
 
-  // Danh sách lần khám hôm nay kèm tiến độ 6 bước (cho lễ tân + bác sĩ)
-  async homNay() {
+  // Danh sách lần khám hôm nay kèm tiến độ 6 bước.
+  // Bác sĩ chỉ thấy bệnh nhân được phân công cho mình; lễ tân/admin thấy toàn bộ.
+  async homNay(user?: any) {
     const d = new Date();
     const ngay = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    const list = await this.lich.createQueryBuilder('lh')
+    const bs = await this.bacSiCuaUser(user);
+    const qb = this.lich.createQueryBuilder('lh')
       .leftJoinAndSelect('lh.ho_so', 'hs')
       .leftJoinAndSelect('lh.khung_gio', 'kg')
       .leftJoinAndSelect('kg.bac_si', 'bs')
       .leftJoinAndSelect('lh.khoa', 'k')
-      .where('kg.ngay = :ngay', { ngay })
-      .orderBy('kg.gio_bat_dau', 'ASC').take(200).getMany();
+      .where('kg.ngay = :ngay', { ngay });
+    if (bs) qb.andWhere('bs.id = :bsId', { bsId: bs.id });
+    const list = await qb.orderBy('kg.gio_bat_dau', 'ASC').take(200).getMany();
     if (!list.length) return [];
 
     const ids = list.map((l) => l.id);
@@ -104,10 +131,10 @@ export class EncounterService {
     }));
   }
 
-  // Chi tiết toàn bộ 6 bước của một lần khám
-  async flow(id: number) {
-    const lich = await this.lich.findOne({ where: { id } });
-    if (!lich) throw new NotFoundException('Lịch hẹn (lần khám) không tồn tại');
+  // Chi tiết toàn bộ 6 bước của một lần khám.
+  // Chặn bác sĩ mở lần khám của bác sĩ khác (layLich kiểm tra quyền sở hữu).
+  async flow(id: number, user?: any) {
+    const lich = await this.layLich(id, user);
     const [sinhHieu, kham, dsCls, ketLuan, thanhToan] = await Promise.all([
       this.sh.findOne({ where: { lich_hen: { id } }, relations: ['nguoi_do'], order: { id: 'DESC' } }),
       this.kls.findOne({ where: { lich_hen: { id } }, relations: ['bac_si'], order: { id: 'DESC' } }),
@@ -137,6 +164,8 @@ export class EncounterService {
         nguoi_chi_dinh: ten(c.nguoi_chi_dinh), nguoi_thuc_hien: ten(c.nguoi_thuc_hien),
       })),
       ket_luan: ketLuan ? { ...ketLuan, lich_hen: undefined, bac_si: ten(ketLuan.bac_si) } : null,
+      // Yêu cầu nhập viện của lần khám (nếu có) để bác sĩ theo dõi tiến độ tiếp nhận
+      nhap_vien: await this.nhapVien.theoLanKham(id),
       thanh_toan: thanhToan ? {
         id: thanhToan.id, ma_thanh_toan: thanhToan.ma_thanh_toan, tong_tien: thanhToan.tong_tien,
         trang_thai: thanhToan.trang_thai, ngay_thanh_toan: thanhToan.ngay_thanh_toan,
@@ -146,8 +175,9 @@ export class EncounterService {
   }
 
   // B2 — lưu sinh hiệu (ghi đè bản ghi cũ nếu đo lại)
-  async luuSinhHieu(userId: number, lichId: number, dto: any) {
-    const lich = await this.layLich(lichId);
+  async luuSinhHieu(user: any, lichId: number, dto: any) {
+    const userId = user.id;
+    const lich = await this.layLich(lichId, user);
     if (lich.trang_thai === TrangThaiLich.DA_HUY) throw new BadRequestException('Lịch hẹn đã hủy');
     const phan_loai = dto?.phan_loai && PHAN_LOAI.includes(dto.phan_loai) ? dto.phan_loai : 'binh_thuong';
     const cao = parseFloat(dto?.chieu_cao), nang = parseFloat(dto?.can_nang);
@@ -168,8 +198,9 @@ export class EncounterService {
   }
 
   // B3 — lưu khám lâm sàng (bác sĩ)
-  async luuKham(userId: number, lichId: number, dto: any) {
-    const lich = await this.layLich(lichId);
+  async luuKham(user: any, lichId: number, dto: any) {
+    const userId = user.id;
+    const lich = await this.layLich(lichId, user);
     if (lich.trang_thai === TrangThaiLich.DA_HUY) throw new BadRequestException('Lịch hẹn đã hủy');
     return this.ds.transaction(async (m) => {
       const cu = await m.findOne(KhamLamSang, { where: { lich_hen: { id: lichId } } });
@@ -185,8 +216,9 @@ export class EncounterService {
   }
 
   // B4 — thêm chỉ định cận lâm sàng
-  async themChiDinh(userId: number, lichId: number, dto: any) {
-    const lich = await this.layLich(lichId);
+  async themChiDinh(user: any, lichId: number, dto: any) {
+    const userId = user.id;
+    const lich = await this.layLich(lichId, user);
     if (lich.trang_thai === TrangThaiLich.DA_HUY) throw new BadRequestException('Lịch hẹn đã hủy');
     const loai = String(dto?.loai || '').trim();
     if (!LOAI_CLS.includes(loai)) throw new BadRequestException('Loại chỉ định phải là xet_nghiem, sieu_am hoặc thu_thuat');
@@ -205,12 +237,15 @@ export class EncounterService {
   }
 
   // B4 — nhập kết quả cho một chỉ định
-  async nhapKetQua(userId: number, chiDinhId: number, dto: any) {
+  async nhapKetQua(user: any, chiDinhId: number, dto: any) {
+    const userId = user.id;
     const ket_qua = cat(dto?.ket_qua, 4000);
     if (!ket_qua) throw new BadRequestException('Kết quả không được để trống');
     return this.ds.transaction(async (m) => {
       const cd = await m.findOne(ChiDinhCLS, { where: { id: chiDinhId }, relations: ['lich_hen'] });
       if (!cd) throw new NotFoundException('Chỉ định không tồn tại');
+      // Chặn bác sĩ nhập kết quả cho chỉ định thuộc lần khám của bác sĩ khác
+      await this.layLich(cd.lich_hen.id, user);
       cd.ket_qua = ket_qua;
       cd.ket_luan = cat(dto?.ket_luan, 2000);
       cd.trang_thai = 'da_co_ket_qua';
@@ -223,18 +258,42 @@ export class EncounterService {
     });
   }
 
-  // B5 — kết luận lần khám; chuyển lich_hen sang da_kham để mở bước thanh toán
-  async ketLuan(userId: number, lichId: number, dto: any) {
-    const lich = await this.layLich(lichId);
+  // B4 — xóa một chỉ định cận lâm sàng (kèm kết quả nếu có)
+  async xoaChiDinh(user: any, chiDinhId: number) {
+    const userId = user.id;
+    return this.ds.transaction(async (m) => {
+      const cd = await m.findOne(ChiDinhCLS, { where: { id: chiDinhId }, relations: ['lich_hen'] });
+      if (!cd) throw new NotFoundException('Chỉ định không tồn tại');
+      // Chặn bác sĩ xóa chỉ định thuộc lần khám của bác sĩ khác
+      const lich = await this.layLich(cd.lich_hen.id, user);
+      if (lich.trang_thai === TrangThaiLich.DA_HUY) throw new BadRequestException('Lịch hẹn đã hủy');
+      const ten = cd.ten_chi_dinh;
+      await m.remove(cd);
+      await this.ghiNhatKy(m, userId, 'xoa_chi_dinh_cls',
+        `Xóa chỉ định "${ten}" khỏi lần khám ${lich.ma_lich_hen}`);
+      return { ok: true };
+    });
+  }
+
+  // B5 — kết luận lần khám; chuyển lich_hen sang da_kham để mở bước thanh toán.
+  // Hướng xử trí "hẹn tái khám" BẮT BUỘC có ngày và sinh lịch hẹn thật + thông báo
+  // cho lễ tân; các hướng khác không cần ngày và không tạo lịch nào.
+  async ketLuan(user: any, lichId: number, dto: any) {
+    const userId = user.id;
+    const lich = await this.layLich(lichId, user);
     if (lich.trang_thai === TrangThaiLich.DA_HUY) throw new BadRequestException('Lịch hẹn đã hủy');
     const chan_doan_chinh = cat(dto?.chan_doan_chinh, 500);
     if (!chan_doan_chinh) throw new BadRequestException('Chẩn đoán chính là bắt buộc');
     const huong_xu_tri = HUONG_XU_TRI.includes(dto?.huong_xu_tri) ? dto.huong_xu_tri : 'ket_thuc';
+    // Không hẹn tái khám thì bỏ hẳn ngày — tránh để lại ngày cũ làm lễ tân hiểu nhầm
     let ngay_tai_kham: string | null = null;
-    if (dto?.ngay_tai_kham) {
-      const s = String(dto.ngay_tai_kham).trim();
+    if (huong_xu_tri === 'hen_tai_kham') {
+      const s = String(dto?.ngay_tai_kham ?? '').trim();
+      if (!s) throw new BadRequestException('Chọn ngày tái khám khi hướng xử trí là hẹn tái khám');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || isNaN(new Date(s).getTime()))
         throw new BadRequestException('Ngày tái khám không hợp lệ (YYYY-MM-DD)');
+      if (s < new Date().toLocaleDateString('en-CA'))
+        throw new BadRequestException('Ngày tái khám không được ở quá khứ');
       ngay_tai_kham = s;
     }
     return this.ds.transaction(async (m) => {
@@ -245,14 +304,65 @@ export class EncounterService {
         bac_si: { id: userId } as any, lich_hen: { id: lichId } as any,
       };
       const saved = await m.save(cu ? m.merge(KetLuanKham, cu, data) : m.create(KetLuanKham, data));
+      const taiKham = ngay_tai_kham
+        ? await this.henTaiKham(m, lich, user, ngay_tai_kham, cat(dto?.loi_dan, 1000) || '')
+        : null;
+      // Đề nghị nhập viện: ký yêu cầu ngay trong transaction này — kết luận và
+      // yêu cầu nhập viện phải cùng thành công hoặc cùng thất bại (tài liệu §3.1)
+      const nhapVien = huong_xu_tri === 'de_nghi_nhap_vien'
+        ? await this.nhapVien.taoYeuCau(m, userId, lich,
+            { chan_doan_chinh, ma_icd: cat(dto?.ma_icd, 30) }, dto?.nhap_vien || {})
+        : null;
       if (lich.trang_thai !== TrangThaiLich.DA_KHAM) {
         lich.trang_thai = TrangThaiLich.DA_KHAM;
         await m.save(lich);
       }
       await this.ghiNhatKy(m, userId, 'ket_luan_kham',
-        `Kết luận lần khám ${lich.ma_lich_hen}: ${chan_doan_chinh}`);
-      return { ...saved, lich_hen: undefined };
+        `Kết luận lần khám ${lich.ma_lich_hen}: ${chan_doan_chinh}` +
+        (taiKham ? ` — hẹn tái khám ${taiKham.ngay} (${taiKham.ma_lich_hen})` : '') +
+        (nhapVien ? ` — đề nghị nhập viện ${nhapVien.ma_yeu_cau}` : ''));
+      return { ...saved, lich_hen: undefined, tai_kham: taiKham, nhap_vien: nhapVien };
     });
+  }
+
+  // Sinh lịch tái khám từ bước 5 và báo cho lễ tân (người check-in bệnh nhân).
+  // Idempotent: bác sĩ sửa lại kết luận với cùng ngày sẽ dùng lại lịch đã có,
+  // không đẻ thêm lịch trùng và không gửi lại thông báo.
+  private async henTaiKham(
+    m: EntityManager, lich: LichHen, user: any, ngay: string, ghiChu: string,
+  ) {
+    const hoSo = lich.ho_so;
+    if (!hoSo) throw new BadRequestException('Lần khám chưa gắn hồ sơ bệnh nhân nên không hẹn tái khám được');
+    const bacSi = (lich.khung_gio && lich.khung_gio.bac_si) || (await this.bacSiCuaUser(user));
+    if (!bacSi) throw new BadRequestException('Không xác định được bác sĩ hẹn tái khám cho lần khám này');
+
+    const daCo = await m.findOne(LichHen, {
+      where: {
+        ho_so: { id: hoSo.id }, khung_gio: { ngay, bac_si: { id: bacSi.id } },
+        trang_thai: Not(TrangThaiLich.DA_HUY),
+      },
+      order: { id: 'DESC' },
+    });
+    if (daCo) {
+      hoSo.ngay_tai_kham = ngay;
+      hoSo.bac_si_tai_kham = { id: bacSi.id } as any;
+      await m.save(hoSo);
+      return {
+        id: daCo.id, ma_lich_hen: daCo.ma_lich_hen, ngay,
+        gio: daCo.khung_gio ? daCo.khung_gio.gio_bat_dau : null, moi: false,
+      };
+    }
+
+    const moi = await this.appt.datLichTaiKham(m, hoSo, bacSi, { ngay, mo_ta: '' }, ghiChu);
+    const leTan = await m.find(NguoiDung, { where: { vai_tro: VaiTro.LE_TAN }, select: ['id'] });
+    await guiThongBao(m, [...leTan.map((u) => u.id), ...(await idQuanTriVien(m))], {
+      loai: 'tai_kham', tieu_de: 'Lịch tái khám mới do bác sĩ hẹn',
+      noi_dung: `${bacSi.ho_ten} hẹn ${hoSo.ho_ten} (${hoSo.ma_benh_nhan}) tái khám ngày ` +
+        `${new Date(ngay).toLocaleDateString('vi-VN')} lúc ${moi.gio} — mã lịch ${moi.ma_lich_hen}` +
+        `${ghiChu ? `. Lời dặn: ${ghiChu}` : ''}`,
+      lich_hen_id: moi.id,
+    });
+    return { id: moi.id, ma_lich_hen: moi.ma_lich_hen, ngay, gio: moi.gio, moi: true };
   }
 }
 
@@ -261,27 +371,30 @@ export class EncounterController {
   constructor(private svc: EncounterService) {}
 
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.BAC_SI, VaiTro.ADMIN)
-  @Get('encounters/today') homNay() { return this.svc.homNay(); }
+  @Get('encounters/today') homNay(@Request() r) { return this.svc.homNay(r.user); }
 
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.BAC_SI, VaiTro.ADMIN)
-  @Get('encounters/:id/flow') flow(@Param('id') id: string) { return this.svc.flow(+id); }
+  @Get('encounters/:id/flow') flow(@Request() r, @Param('id') id: string) { return this.svc.flow(+id, r.user); }
 
   // B2 — sinh hiệu: điều dưỡng/lễ tân hoặc bác sĩ đo
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.LE_TAN, VaiTro.BAC_SI, VaiTro.ADMIN)
-  @Post('encounters/:id/vitals') vitals(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.luuSinhHieu(r.user.id, +id, b); }
+  @Post('encounters/:id/vitals') vitals(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.luuSinhHieu(r.user, +id, b); }
 
   // B3 — khám lâm sàng: chỉ bác sĩ
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.BAC_SI, VaiTro.ADMIN)
-  @Post('encounters/:id/exam') exam(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.luuKham(r.user.id, +id, b); }
+  @Post('encounters/:id/exam') exam(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.luuKham(r.user, +id, b); }
 
   // B4 — chỉ định + kết quả: bác sĩ (kỹ thuật viên chưa có vai trò riêng)
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.BAC_SI, VaiTro.ADMIN)
-  @Post('encounters/:id/orders') order(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.themChiDinh(r.user.id, +id, b); }
+  @Post('encounters/:id/orders') order(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.themChiDinh(r.user, +id, b); }
 
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.BAC_SI, VaiTro.ADMIN)
-  @Patch('encounters/orders/:orderId/result') result(@Request() r, @Param('orderId') id: string, @Body() b) { return this.svc.nhapKetQua(r.user.id, +id, b); }
+  @Patch('encounters/orders/:orderId/result') result(@Request() r, @Param('orderId') id: string, @Body() b) { return this.svc.nhapKetQua(r.user, +id, b); }
+
+  @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.BAC_SI, VaiTro.ADMIN)
+  @Delete('encounters/orders/:orderId') removeOrder(@Request() r, @Param('orderId') id: string) { return this.svc.xoaChiDinh(r.user, +id); }
 
   // B5 — kết luận: chỉ bác sĩ
   @UseGuards(JwtAuthGuard, RolesGuard) @Roles(VaiTro.BAC_SI, VaiTro.ADMIN)
-  @Post('encounters/:id/conclusion') conclusion(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.ketLuan(r.user.id, +id, b); }
+  @Post('encounters/:id/conclusion') conclusion(@Request() r, @Param('id') id: string, @Body() b) { return this.svc.ketLuan(r.user, +id, b); }
 }
